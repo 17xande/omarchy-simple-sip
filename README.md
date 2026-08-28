@@ -186,6 +186,17 @@ new Function("exports",s+"\nObject.assign(exports,{normalizeTarget,parseReginfo}
 console.log(M.normalizeTarget("1001","sip:you@pbx.example.com"));'
 ```
 
+### Tests
+
+```bash
+./tests/run
+```
+
+Two dependency-free suites: `tests/model_test.js` covers every pure function in
+`Model.js` (event mapping, URI completion, the registration-status scraping, relative
+times), and `tests/tracker_test.py` covers the call log's made / received / missed
+classification, interleaved calls, the size cap and file permissions.
+
 `qmllint` cannot resolve the shell's `Panel` type and exits 255 with no output on
 this plugin *and* on the first-party ones, so it is not a useful gate here.
 
