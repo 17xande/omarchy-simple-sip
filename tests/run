@@ -4,5 +4,6 @@ set -euo pipefail
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 echo "== Model.js"      && node "$here/model_test.js"
 echo "== CallTracker"   && python3 "$here/tracker_test.py"
+echo "== file I/O"     && python3 "$here/io_test.py"
 echo "== manifest"      && omarchy plugin validate "$here/.."
 echo "All green."

@@ -15,6 +15,15 @@ Item {
 
   property var settings: ({})
 
+  // ------------------------------------------------------------------ limits
+  //
+  // The CLI bounds what it prints, but this side must bound what it retains:
+  // StdioCollector holds an entire stream, so anything whose full text we do
+  // not actually need is consumed a line at a time and clipped as it arrives.
+  readonly property int maxLineChars: 65536    // matches MAX_LINE in the CLI
+  readonly property int maxJsonChars: 262144   // a status/history document
+  readonly property int maxErrorChars: 240     // what lastError can ever hold
+
   // Qt.resolvedUrl(".") may or may not carry a trailing slash depending on the
   // loader, so normalise before appending.
   readonly property string pluginDir: Qt.resolvedUrl(".").toString().replace("file://", "").replace(/\/+$/, "")
@@ -81,19 +90,31 @@ Item {
     if (statusProcess.running) return
     statusProcess.command = [cli, "status"]
     statusProcess.running = true
+    statusWatchdog.restart()
   }
 
   function refreshHistory() {
     if (historyProcess.running || historyLimit === 0) return
     historyProcess.command = [cli, "history", "--limit", String(historyLimit)]
     historyProcess.running = true
+    historyWatchdog.restart()
   }
 
   function run(args) {
     if (actionProcess.running) return
     lastError = ""
+    actionProcess.errText = ""
     actionProcess.command = [cli].concat(args)
     actionProcess.running = true
+    actionWatchdog.restart()
+  }
+
+  // Keeps a bounded prefix of a process's diagnostic output. Called per line,
+  // so nothing larger than one line is ever held, let alone the whole stream.
+  function appendBounded(buf, line) {
+    if (buf.length >= maxErrorChars) return buf
+    var text = String(line || "").replace(/\s+/g, " ")
+    return (buf === "" ? text : buf + " " + text).substring(0, maxErrorChars)
   }
 
   function dial(input) {
@@ -127,8 +148,10 @@ Item {
     if (displayName) args = args.concat(["--display-name", displayName])
     if (transport) args = args.concat(["--transport", transport])
     lastError = ""
+    accountProcess.errText = ""
     accountProcess.command = args
     accountProcess.running = true
+    accountWatchdog.restart()
     accountProcess.write(String(password || "") + "\n")
     accountProcess.stdinEnabled = false
   }
@@ -136,7 +159,11 @@ Item {
   // ------------------------------------------------------------------ events
 
   function handleLine(line) {
-    var text = String(line || "").trim()
+    var text = String(line || "")
+    // The journal caps its own records, but this listener runs for the whole
+    // shell session: refuse an oversized line before it reaches JSON.parse.
+    if (text.length > maxLineChars) return
+    text = text.trim()
     if (text === "") return
     var event
     try {
@@ -205,9 +232,11 @@ Item {
   }
 
   function applyStatus(text) {
+    var raw = String(text || "")
+    if (raw.length > maxJsonChars) return
     var status
     try {
-      status = JSON.parse(String(text || ""))
+      status = JSON.parse(raw)
     } catch (e) {
       return
     }
@@ -251,15 +280,22 @@ Item {
     }
   }
 
+  // The one place a whole document is needed, so StdioCollector stays -- but
+  // the CLI clamps --limit and clips every field, and the watchdog below bounds
+  // how long this can run at all.
   Process {
     id: historyProcess
     running: false
     command: []
     stdout: StdioCollector { id: historyOut; waitForEnd: true }
     onExited: function(exitCode) {
+      historyWatchdog.stop()
       if (exitCode !== 0) return
+      var raw = String(historyOut.text || "[]")
+      if (raw.length > root.maxJsonChars) return
       try {
-        root.history = JSON.parse(String(historyOut.text || "[]"))
+        var parsed = JSON.parse(raw)
+        root.history = Array.isArray(parsed) ? parsed : []
       } catch (e) {
         root.history = []
       }
@@ -277,22 +313,32 @@ Item {
     running: false
     command: []
     stdout: StdioCollector { id: statusOut; waitForEnd: true }
-    stderr: StdioCollector { id: statusErr; waitForEnd: true }
+    // No stderr parser: with none set Quickshell discards the stream, which is
+    // what we want here -- nothing read it, and collecting it only retained it.
     onExited: function(exitCode) {
+      statusWatchdog.stop()
       if (exitCode === 0) root.applyStatus(statusOut.text)
       else root.daemonUp = false
     }
   }
 
+  // Only ever needs an error message, so both streams feed one bounded buffer
+  // instead of two StdioCollectors retaining everything the CLI ever printed.
   Process {
     id: actionProcess
+    property string errText: ""
     running: false
     command: []
-    stdout: StdioCollector { id: actionOut; waitForEnd: true }
-    stderr: StdioCollector { id: actionErr; waitForEnd: true }
+    stdout: SplitParser {
+      onRead: function(line) { actionProcess.errText = root.appendBounded(actionProcess.errText, line) }
+    }
+    stderr: SplitParser {
+      onRead: function(line) { actionProcess.errText = root.appendBounded(actionProcess.errText, line) }
+    }
     onExited: function(exitCode) {
+      actionWatchdog.stop()
       if (exitCode !== 0) {
-        root.lastError = elide(actionErr.text || actionOut.text || "Command failed")
+        root.lastError = elide(actionProcess.errText || "Command failed")
         // The optimistic dial never happened -- fall back to what is real.
         root.refresh()
       }
@@ -301,13 +347,19 @@ Item {
 
   Process {
     id: accountProcess
+    property string errText: ""
     running: false
     command: []
     stdinEnabled: true
-    stdout: StdioCollector { id: accountOut; waitForEnd: true }
-    stderr: StdioCollector { id: accountErr; waitForEnd: true }
+    stdout: SplitParser {
+      onRead: function(line) { accountProcess.errText = root.appendBounded(accountProcess.errText, line) }
+    }
+    stderr: SplitParser {
+      onRead: function(line) { accountProcess.errText = root.appendBounded(accountProcess.errText, line) }
+    }
     onExited: function(exitCode) {
-      if (exitCode !== 0) root.lastError = elide(accountErr.text || accountOut.text || "Could not save account")
+      accountWatchdog.stop()
+      if (exitCode !== 0) root.lastError = elide(accountProcess.errText || "Could not save account")
       else root.lastError = ""
       accountProcess.stdinEnabled = true
       // The daemon restarts on an account change; give it a moment to register.
@@ -318,6 +370,48 @@ Item {
   function elide(text) {
     var value = String(text || "").replace(/\s+/g, " ").trim()
     return value.length > 160 ? value.substring(0, 157) + "…" : value
+  }
+
+  // ------------------------------------------------------------- watchdogs
+  //
+  // Every finite CLI call gets a whole-process deadline. Setting running to
+  // false terminates the child, so a helper wedged on a substituted file or a
+  // registrar that never answers cannot hold a slot (or its output buffer)
+  // open for the rest of the shell session. eventsProcess is deliberately
+  // exempt: it is the long-lived listener, and is bounded by the record cap
+  // the journal reader enforces instead.
+  Timer {
+    id: statusWatchdog
+    interval: 15000
+    onTriggered: if (statusProcess.running) { statusProcess.running = false; root.daemonUp = false }
+  }
+
+  Timer {
+    id: historyWatchdog
+    interval: 10000
+    onTriggered: if (historyProcess.running) historyProcess.running = false
+  }
+
+  Timer {
+    id: actionWatchdog
+    interval: 15000
+    onTriggered: {
+      if (!actionProcess.running) return
+      actionProcess.running = false
+      root.lastError = "Command timed out"
+      root.refresh()
+    }
+  }
+
+  // An account change restarts the daemon, so this one is allowed to be slower.
+  Timer {
+    id: accountWatchdog
+    interval: 20000
+    onTriggered: {
+      if (!accountProcess.running) return
+      accountProcess.running = false
+      root.lastError = "Saving the account timed out"
+    }
   }
 
   // The journal only exists while the daemon runs, so `events` exits whenever

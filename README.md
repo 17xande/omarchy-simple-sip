@@ -144,9 +144,45 @@ Environment overrides: `OMARCHY_SIP_CONF` (config dir, default
 - Passwords are passed to the CLI on **stdin**, never as an argument, so they never
   appear in a process listing.
 - `ctrl_tcp` has no authentication. It binds `127.0.0.1` only — but that still means
-  any local process can place calls through the daemon.
+  any local process can place calls through the daemon. The daemon refuses to start
+  if that port is already held, rather than adopting somebody else's baresip.
 - Like all Omarchy plugins, this runs unsandboxed inside the long-lived
   `omarchy-shell` process, with your user's permissions.
+
+### Files and descriptors
+
+Both directories the plugin owns — `~/.config/omarchy-sip` and
+`$XDG_RUNTIME_DIR/omarchy-sip` — are created at mode `0700` and then *pinned*: a
+symlink, a non-directory, or a directory belonging to another user in either place
+is a hard error, not something to write into.
+
+Every persistent object (the command FIFO, the event journal, `history.jsonl`, the
+accounts and config files, baresip's log) is opened with `O_NOFOLLOW | O_NONBLOCK`
+and then validated with `fstat` **on the descriptor that will actually be used**, for
+both file type and owner. Checking the descriptor rather than the pathname is what
+makes the check unraceable, and `O_NONBLOCK` is what stops a FIFO substituted for a
+regular file from parking a helper inside `open()`. `write_fifo` therefore fails
+immediately — rather than hanging the panel — when there is no daemon reading.
+
+Nothing is read without a ceiling: whole-file reads cap at 1 MiB, one journal record
+or FIFO command at 64 KiB, one history field at 512 bytes, and baresip's prose replies
+at 8 KiB before they are spliced into `omarchy-sip status`. An oversized record is
+dropped and noted in the journal instead of buffered.
+
+### Processes
+
+The QML side consumes each helper's diagnostic output a line at a time into a
+240-character buffer, instead of retaining whole streams, and every finite CLI call
+has a whole-process deadline (10–20 s) after which the child is terminated. The
+`omarchy-sip events` listener is the one long-lived process, so it is bounded by the
+record cap in the journal reader rather than by a deadline.
+
+### Privileges
+
+The plugin never invokes `sudo` and never calls a package manager. `pacman -S baresip`
+in [Requirements](#requirements) is an instruction for you to run. `systemctl` is only
+ever called as `systemctl --user` and only ever names this plugin's own unit,
+`omarchy-sip.service`.
 
 ## Not in this version
 
@@ -192,10 +228,14 @@ console.log(M.normalizeTarget("1001","sip:you@pbx.example.com"));'
 ./tests/run
 ```
 
-Two dependency-free suites: `tests/model_test.js` covers every pure function in
+Three dependency-free suites: `tests/model_test.js` covers every pure function in
 `Model.js` (event mapping, URI completion, the registration-status scraping, relative
-times), and `tests/tracker_test.py` covers the call log's made / received / missed
-classification, interleaved calls, the size cap and file permissions.
+times), `tests/tracker_test.py` covers the call log's made / received / missed
+classification, interleaved calls, the size cap and file permissions, and
+`tests/io_test.py` covers the file/descriptor discipline described under
+[Security notes](#files-and-descriptors) — each case swaps a symlink, a FIFO or an
+oversized record in for something the plugin expects to own, and asserts it fails or
+clips rather than following, blocking, or buffering without limit.
 
 `qmllint` cannot resolve the shell's `Panel` type and exits 255 with no output on
 this plugin *and* on the first-party ones, so it is not a useful gate here.
