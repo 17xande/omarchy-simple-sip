@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.17xande.simple-sip",
+  "name": "Simple SIP",
+  "version": "0.1.0",
+  "author": "Alexandre Figueiredo",
+  "license": "MIT",
+  "description": "A simple SIP softphone in the Omarchy bar: register one account, place calls, and answer incoming ones. Powered by baresip.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Simple SIP",
+    "description": "Register a SIP account, dial out, and answer incoming calls without leaving the bar.",
+    "category": "Network",
+    "aliases": [
+      "sip",
+      "voip",
+      "phone",
+      "softphone",
+      "call",
+      "baresip"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "ringNotifications": true,
+      "autoOpenOnIncoming": true,
+      "statusRefreshSec": 60,
+      "historyLimit": 5
+    },
+    "schema": [
+      {
+        "key": "ringNotifications",
+        "type": "boolean",
+        "label": "Notify on incoming calls",
+        "defaultValue": true
+      },
+      {
+        "key": "autoOpenOnIncoming",
+        "type": "boolean",
+        "label": "Open the panel when a call comes in",
+        "defaultValue": true
+      },
+      {
+        "key": "historyLimit",
+        "type": "integer",
+        "label": "Recent calls to show (0 hides the list)",
+        "min": 0,
+        "max": 20,
+        "step": 1,
+        "defaultValue": 5
+      },
+      {
+        "key": "statusRefreshSec",
+        "type": "integer",
+        "label": "Status resync interval (seconds)",
+        "min": 10,
+        "max": 600,
+        "step": 10,
+        "defaultValue": 60
+      }
+    ]
+  }
+}

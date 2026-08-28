@@ -1,0 +1,5 @@
+# Nothing here is generated -- the plugin ships as source.
+__pycache__/
+*.pyc
+*.swp
+.DS_Store
