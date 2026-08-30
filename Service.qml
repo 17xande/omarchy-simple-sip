@@ -29,6 +29,12 @@ Item {
   readonly property string pluginDir: Qt.resolvedUrl(".").toString().replace("file://", "").replace(/\/+$/, "")
   readonly property string cli: pluginDir + "/bin/omarchy-sip"
 
+  // The daemon's control socket. Connecting to it directly means the panel no
+  // longer keeps a long-lived `omarchy-sip events` subprocess alive just to
+  // hear about calls, and commands go straight down the same connection.
+  readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR") || "/run/user/1000"
+  readonly property string controlPath: runtimeDir + "/omarchy-sip/control"
+
   // ------------------------------------------------------------------ state
   property bool installed: false
   property bool unitActive: false
@@ -109,6 +115,19 @@ Item {
     actionWatchdog.restart()
   }
 
+  // One JSON object per line, straight down the control socket -- no process,
+  // no FIFO, nothing on disk in the path of a keypress.
+  function command(name, params) {
+    if (!control.connected) {
+      lastError = "Not connected to the SIP daemon"
+      return false
+    }
+    var obj = { command: name, token: "panel" }
+    if (params) obj.params = params
+    control.write(JSON.stringify(obj) + "\n")
+    return true
+  }
+
   // Keeps a bounded prefix of a process's diagnostic output. Called per line,
   // so nothing larger than one line is ever held, let alone the whole stream.
   function appendBounded(buf, line) {
@@ -125,17 +144,17 @@ Item {
     callState = "outgoing"
     peer = Model.peerLabel(target)
     callStartedAt = 0
-    run(["dial", target])
+    if (!command("dial", target)) refresh()
   }
 
   function answer() {
     if (callState !== "incoming") return
-    run(["answer"])
+    command("accept")
   }
 
   function hangup() {
     if (callState === "idle") return
-    run(["hangup"])
+    command("hangup")
   }
 
   function startDaemon() { run(["start"]) }
@@ -268,15 +287,24 @@ Item {
 
   // Long-lived: a bar widget is loaded for the whole shell session, so this is
   // the always-on listener that makes an inbound call ring even with the panel
-  // closed.
-  Process {
-    id: eventsProcess
-    command: [root.cli, "events"]
-    running: true
-    stdout: SplitParser { onRead: function(line) { root.handleLine(line) } }
-    onExited: function(exitCode) {
+  // closed. A socket rather than a subprocess reading a journal file, so there
+  // is no child process to supervise and nothing on disk to re-resolve.
+  Socket {
+    id: control
+    path: root.controlPath
+    connected: true
+    parser: SplitParser { onRead: function(line) { root.handleLine(line) } }
+    onConnectionStateChanged: {
+      if (connected) {
+        root.refresh()
+      } else {
+        root.daemonUp = false
+        reconnectTimer.restart()
+      }
+    }
+    onError: function(err) {
       root.daemonUp = false
-      restartTimer.restart()
+      reconnectTimer.restart()
     }
   }
 
@@ -377,9 +405,9 @@ Item {
   // Every finite CLI call gets a whole-process deadline. Setting running to
   // false terminates the child, so a helper wedged on a substituted file or a
   // registrar that never answers cannot hold a slot (or its output buffer)
-  // open for the rest of the shell session. eventsProcess is deliberately
-  // exempt: it is the long-lived listener, and is bounded by the record cap
-  // the journal reader enforces instead.
+  // open for the rest of the shell session. The control socket is deliberately
+  // exempt: it is the long-lived listener, and is bounded instead by the
+  // per-record cap the daemon and handleLine both enforce.
   Timer {
     id: statusWatchdog
     interval: 15000
@@ -414,13 +442,13 @@ Item {
     }
   }
 
-  // The journal only exists while the daemon runs, so `events` exits whenever
-  // the daemon is down. Retry steadily rather than giving up.
+  // The socket only exists while the daemon runs, so the connection drops
+  // whenever it restarts. Retry steadily rather than giving up.
   Timer {
-    id: restartTimer
+    id: reconnectTimer
     interval: 3000
     onTriggered: {
-      eventsProcess.running = true
+      if (!control.connected) control.connected = true
       root.refresh()
     }
   }

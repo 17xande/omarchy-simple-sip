@@ -84,21 +84,25 @@ is **not** free — Omarchy binds it to Google Photos.
 
 baresip's `ctrl_tcp` module accepts **only one** control connection — its connect
 handler drops any existing client when a new one arrives. So a single daemon owns
-that socket and everything else goes through two files:
+that socket and everything else goes through one unix socket:
 
 ```
-$XDG_RUNTIME_DIR/omarchy-sip/cmd      FIFO   -- one JSON command per line, in
-$XDG_RUNTIME_DIR/omarchy-sip/events   file   -- one JSON object per line, out
+$XDG_RUNTIME_DIR/omarchy-sip/control   one JSON object per line, both directions
 ```
 
-Both baresip events and command responses land in the journal, so any number of
-readers can tail it and see the whole picture. The panel drives its state from
-*events* (structured); the `status` snapshot exists only to resync after a shell
-restart, when the last registration event may be minutes old.
+Clients connect, write commands, and read the event stream back. Every baresip
+event and every command response is broadcast to every connected client, so any
+number of readers see the whole picture. The panel drives its state from *events*
+(structured); the `status` snapshot exists only to resync after a shell restart,
+when the last registration event may be minutes old.
+
+A socket rather than a FIFO plus an on-disk journal is a deliberate security
+choice: nothing persistent has to be reopened by name to move a message, which
+removes the substitution and truncation races that come with re-resolving a
+pathname in a directory other local processes can write to.
 
 ```
-Panel.qml ──┬─ Process: omarchy-sip events ──── tails the journal
-            └─ Process: omarchy-sip dial/answer/hangup ── writes the FIFO
+Panel.qml ──── Socket: $XDG_RUNTIME_DIR/omarchy-sip/control
                                     │
                           omarchy-sip daemon ── owns the one ctrl_tcp connection
                                     │
@@ -120,7 +124,7 @@ does not change.
 omarchy-sip install | uninstall            set up or remove the user service
 omarchy-sip start | stop | restart         control the daemon
 omarchy-sip status                         JSON: unit, account and baresip state
-omarchy-sip events                         stream the JSON event journal
+omarchy-sip events                         stream the JSON event feed
 omarchy-sip dial <uri> | answer | hangup   call control
 omarchy-sip send <cmd> [params]            any baresip command, fire-and-forget
 omarchy-sip cmd  <cmd> [params]            ... and print the response
@@ -149,33 +153,61 @@ Environment overrides: `OMARCHY_SIP_CONF` (config dir, default
 - Like all Omarchy plugins, this runs unsandboxed inside the long-lived
   `omarchy-shell` process, with your user's permissions.
 
-### Files and descriptors
+### Directories and descriptors
 
 Both directories the plugin owns — `~/.config/omarchy-sip` and
-`$XDG_RUNTIME_DIR/omarchy-sip` — are created at mode `0700` and then *pinned*: a
-symlink, a non-directory, or a directory belonging to another user in either place
-is a hard error, not something to write into.
+`$XDG_RUNTIME_DIR/omarchy-sip` — are *pinned*. The path is walked from `/` one
+component at a time, each component opened with `O_DIRECTORY | O_NOFOLLOW` relative
+to the descriptor of the one above it and checked for ownership, and the leaf
+descriptor is then held for the life of the process. Everything afterwards is
+opened relative to that descriptor by basename.
 
-Every persistent object (the command FIFO, the event journal, `history.jsonl`, the
-accounts and config files, baresip's log) is opened with `O_NOFOLLOW | O_NONBLOCK`
-and then validated with `fstat` **on the descriptor that will actually be used**, for
-both file type and owner. Checking the descriptor rather than the pathname is what
-makes the check unraceable, and `O_NONBLOCK` is what stops a FIFO substituted for a
-regular file from parking a helper inside `open()`. `write_fifo` therefore fails
-immediately — rather than hanging the panel — when there is no daemon reading.
+This matters because validating a *name* and reopening it later is not enough: a
+process running as you can replace an intermediate directory in between, and a
+final-component `O_NOFOLLOW` will not notice that the directory underneath changed.
+A held descriptor refers to the directory *inode*, so it keeps resolving to the same
+place no matter what happens to the names above it.
 
-Nothing is read without a ceiling: whole-file reads cap at 1 MiB, one journal record
-or FIFO command at 64 KiB, one history field at 512 bytes, and baresip's prose replies
-at 8 KiB before they are spliced into `omarchy-sip status`. An oversized record is
-dropped and noted in the journal instead of buffered.
+Each file is then opened with `O_NOFOLLOW | O_NONBLOCK | O_NOCTTY` and validated with
+`fstat` **on the descriptor that will actually be used**, for type and owner.
+Checking the descriptor rather than the pathname is what makes the check unraceable,
+and `O_NONBLOCK` is what stops a FIFO substituted for a regular file from parking a
+helper inside `open()`.
+
+### Writes replace, they never truncate
+
+`O_NOFOLLOW` refuses a symlink but not a same-owner **hard link**. Opening
+`accounts` with `O_TRUNC` would push your SIP password straight into whatever a
+planted link points at, before any check could reject it. So a destination is never
+opened for writing. Instead a fresh file is created under the pinned directory
+descriptor with `O_CREAT | O_EXCL` and an unpredictable name — `O_EXCL` guarantees a
+brand-new inode with no pre-existing links — written, `fsync`ed, revalidated on the
+still-open write descriptor, and moved into place with `renameat`. A planted hard
+link keeps the old bytes; a planted symlink is replaced and its target untouched.
+
+### Ceilings
+
+Nothing is read without one: whole-file reads cap at 1 MiB, one event record or
+command line at 64 KiB, one history field at 512 bytes, 200 history records, and
+baresip's prose replies at 8 KiB before they are spliced into `omarchy-sip status`.
+An oversized record is dropped and the stream resynchronises at the next newline
+rather than buffering. A client that never sends a newline cannot grow the daemon's
+memory, and one that stops reading is disconnected rather than buffered forever.
 
 ### Processes
 
 The QML side consumes each helper's diagnostic output a line at a time into a
-240-character buffer, instead of retaining whole streams, and every finite CLI call
+240-character buffer instead of retaining whole streams, and every finite CLI call
 has a whole-process deadline (10–20 s) after which the child is terminated. The
-`omarchy-sip events` listener is the one long-lived process, so it is bounded by the
-record cap in the journal reader rather than by a deadline.
+control socket is the one long-lived connection, and it is bounded by the per-record
+cap rather than by a deadline.
+
+### Limits of all this
+
+A process already running as your user can do anything you can do; none of the above
+is a boundary against *you*. What it defends is the narrower and more realistic case
+of a confused deputy — something that can create a file or a link in one of these
+directories persuading the daemon to read, write, or block on the wrong object.
 
 ### Privileges
 
@@ -207,7 +239,11 @@ baresip is holding `127.0.0.1:44510`; the daemon deliberately will not adopt it.
 
 ## Hacking on it
 
-`.qml` edits hot-reload. **`Model.js` edits do not** — the QML engine caches JS
+`.qml` edits hot-reload *into new instances*, but a bar widget already on the bar
+keeps running the code it was created with — `omarchy-shell shell rescanPlugins`
+will happily report "reloading" while the live widget carries on unchanged. Run
+`omarchy-restart-shell` after touching `Service.qml` or `Panel.qml` if the change
+does not seem to take. **`Model.js` edits never hot-reload** — the QML engine caches JS
 imports for the life of the shell process, and neither `omarchy-shell shell
 rescanPlugins` nor disabling/re-enabling the plugin clears them. Run
 `omarchy-restart-shell` after touching `Model.js` (not `omarchy-refresh-shell`,
@@ -233,9 +269,10 @@ Three dependency-free suites: `tests/model_test.js` covers every pure function i
 times), `tests/tracker_test.py` covers the call log's made / received / missed
 classification, interleaved calls, the size cap and file permissions, and
 `tests/io_test.py` covers the file/descriptor discipline described under
-[Security notes](#files-and-descriptors) — each case swaps a symlink, a FIFO or an
-oversized record in for something the plugin expects to own, and asserts it fails or
-clips rather than following, blocking, or buffering without limit.
+[Security notes](#directories-and-descriptors) — each case swaps a symlink, a FIFO,
+an intermediate directory or a hard link in for something the plugin expects to own,
+and asserts it fails, clips, or lands on the pinned object rather than following,
+blocking, or buffering without limit.
 
 `qmllint` cannot resolve the shell's `Panel` type and exits 255 with no output on
 this plugin *and* on the first-party ones, so it is not a useful gate here.
