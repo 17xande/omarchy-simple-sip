@@ -1,12 +1,13 @@
 """Exercise the file/descriptor discipline the daemon and CLI depend on.
 
-Every case here is a substitution attack in miniature: swap a symlink, a FIFO
-or an oversized file in for something the plugin expects to own, and check that
-it fails or clips instead of following, blocking, or buffering without limit.
+Every case here is a substitution attack in miniature: swap a symlink, a FIFO,
+an intermediate directory or a hard link in for something the plugin expects to
+own, and check that it fails, clips, or lands on the pinned object instead of
+following, blocking, or buffering without limit.
 
 Run: python3 tests/io_test.py
 """
-import contextlib, importlib.machinery, importlib.util, io, os, stat, sys, tempfile, time
+import contextlib, importlib.machinery, importlib.util, io, os, socket, stat, sys, tempfile, time
 
 spec = importlib.util.spec_from_loader(
     "omarchy_sip",
@@ -42,87 +43,133 @@ def path(name):
     return os.path.join(tmp, name)
 
 
-# --------------------------------------------------------------- secure_dir
+# ------------------------------------------------------------------- pin_dir
 
 os.mkdir(path("real"), 0o700)
 os.symlink(path("real"), path("link"))
-check("secure_dir rejects a symlinked directory", dies(mod.secure_dir, path("link")))
+check("pin_dir refuses a symlinked leaf", dies(mod.pin_dir, path("link")))
+
+os.mkdir(path("chain"), 0o755)
+os.mkdir(path("chain/mid"), 0o755)
+os.mkdir(path("chain/mid/leaf"), 0o700)
+os.symlink(path("chain/mid"), path("chain/vialink"))
+check("pin_dir refuses a symlinked intermediate component",
+      dies(mod.pin_dir, path("chain/vialink/leaf")))
 
 os.mkdir(path("loose"), 0o755)
-mod.secure_dir(path("loose"))
-check("secure_dir tightens a group/other-readable dir",
+os.close(mod.pin_dir(path("loose")))
+check("pin_dir tightens a group/other-readable leaf",
       stat.S_IMODE(os.stat(path("loose")).st_mode) == 0o700)
 
-mod.secure_dir(path("fresh/nested"))
-check("secure_dir creates a missing dir at 0700",
+os.close(mod.pin_dir(path("fresh/nested")))
+check("pin_dir creates a missing leaf at 0700",
       stat.S_IMODE(os.stat(path("fresh/nested")).st_mode) == 0o700)
 
-mod.write_private(path("notadir"), "")
-check("secure_dir rejects a plain file", dies(mod.secure_dir, path("notadir")))
+mod.write_private("notadir", "", mod.dir_fd_for(path("real")))
+check("pin_dir refuses a plain file", dies(mod.pin_dir, path("real/notadir")))
+
+
+# ------------------------- the finding: same-UID intermediate component swap
+
+# a/b/c pinned, then `b` replaced wholesale by an attacker-controlled directory
+# holding a decoy. A pinned descriptor must keep resolving to the real leaf.
+os.makedirs(path("swap/b/c"), 0o700)
+pinned = mod.pin_dir(path("swap/b/c"))
+mod.write_private("accounts", "real-secret\n", pinned)
+real_ino = os.stat(path("swap/b/c/accounts")).st_ino
+
+os.makedirs(path("evil/c"), 0o700)
+with open(path("evil/c/accounts"), "w") as fh:
+    fh.write("decoy\n")
+os.rename(path("swap/b"), path("swap/b-old"))
+os.rename(path("evil"), path("swap/b"))
+
+got = mod.read_bounded("accounts", pinned)
+check("pinned dir survives an intermediate component swap", got == "real-secret\n")
+check("swapped-in decoy is never read", "decoy" not in got)
+check("reads still land on the original inode",
+      os.fstat(mod.open_checked("accounts", os.O_RDONLY, dir_fd=pinned)).st_ino == real_ino)
+
+# ...and the leaf itself being replaced changes nothing for a held descriptor.
+os.rename(path("swap/b/c"), path("swap/b/c-gone"))
+os.mkdir(path("swap/b/c"), 0o700)
+with open(path("swap/b/c/accounts"), "w") as fh:
+    fh.write("decoy2\n")
+check("pinned dir survives the leaf directory being replaced",
+      mod.read_bounded("accounts", pinned) == "real-secret\n")
+os.close(pinned)
 
 
 # -------------------------------------------------------- open_checked reads
 
-with open(path("plain"), "w") as fh:
-    fh.write("hello\n")
-os.symlink(path("plain"), path("plain.link"))
+conf = mod.dir_fd_for(path("conf"))
+mod.write_private("plain", "hello\n", conf)
+os.symlink(path("conf/plain"), path("conf/plain.link"))
 
 try:
-    fd = mod.open_checked(path("plain.link"), os.O_RDONLY)
-    os.close(fd)
+    os.close(mod.open_checked("plain.link", os.O_RDONLY, dir_fd=conf))
     check("open_checked refuses a symlink", False)
 except OSError:
     check("open_checked refuses a symlink", True)
 
-check("read_bounded returns nothing for a symlink", mod.read_bounded(path("plain.link")) == "")
-check("read_bounded reads a real file", mod.read_bounded(path("plain")) == "hello\n")
+check("read_bounded returns nothing for a symlink",
+      mod.read_bounded("plain.link", conf) == "")
+check("read_bounded reads a real file", mod.read_bounded("plain", conf) == "hello\n")
 
 # A FIFO standing in for a regular file must fail fast, never park us in open().
-os.mkfifo(path("fifo-as-file"), 0o600)
+os.mkfifo(path("conf/fifo-as-file"), 0o600)
 started = time.monotonic()
-got = mod.read_bounded(path("fifo-as-file"))
+got = mod.read_bounded("fifo-as-file", conf)
 check("read_bounded refuses a FIFO without blocking",
       got == "" and time.monotonic() - started < 1.0)
 
-with open(path("big"), "w") as fh:
-    fh.write("x" * 5000)
-check("read_bounded stops at its limit", len(mod.read_bounded(path("big"), 100)) == 100)
+mod.write_private("big", "x" * 5000, conf)
+check("read_bounded stops at its limit", len(mod.read_bounded("big", conf, 100)) == 100)
 
 
-# ------------------------------------------------------------ write_file mode
+# ------------------------------------------------- replace, never truncate
 
-mod.write_private(path("secret"), "shh")
+mod.write_private("secret", "shh", conf)
 check("write_private creates a 0600 file",
-      stat.S_IMODE(os.stat(path("secret")).st_mode) == 0o600)
+      stat.S_IMODE(os.stat(path("conf/secret")).st_mode) == 0o600)
 
-os.chmod(path("secret"), 0o644)
-mod.write_private(path("secret"), "shh again")
+os.chmod(path("conf/secret"), 0o644)
+mod.write_private("secret", "shh again", conf)
 check("write_private narrows a widened mode back to 0600",
-      stat.S_IMODE(os.stat(path("secret")).st_mode) == 0o600)
+      stat.S_IMODE(os.stat(path("conf/secret")).st_mode) == 0o600)
 
-try:
-    mod.write_private(path("plain.link"), "via symlink")
-    check("write_private refuses to follow a symlink", False)
-except OSError:
-    check("write_private refuses to follow a symlink",
-          mod.read_bounded(path("plain")) == "hello\n")
+# O_NOFOLLOW stops a symlink but not a same-owner HARD LINK. Truncating in
+# place would push the new password into a file somebody else already holds.
+mod.write_private("creds", "old-password\n", conf)
+os.link(path("conf/creds"), path("conf/creds.planted"))
+mod.write_private("creds", "new-password\n", conf)
+check("hard link keeps the old bytes (replace, not truncate)",
+      open(path("conf/creds.planted")).read() == "old-password\n")
+check("the real file has the new bytes",
+      open(path("conf/creds")).read() == "new-password\n")
+check("planted link count drops back to 1",
+      os.stat(path("conf/creds.planted")).st_nlink == 1)
+
+# A symlink planted at the destination is replaced, and its target untouched.
+mod.write_private("target", "untouched\n", conf)
+os.symlink(path("conf/target"), path("conf/dest"))
+mod.write_private("dest", "written\n", conf)
+check("symlink at the destination is replaced, not written through",
+      not os.path.islink(path("conf/dest"))
+      and open(path("conf/target")).read() == "untouched\n"
+      and open(path("conf/dest")).read() == "written\n")
 
 
 # -------------------------------------------------------------- record bounds
 
-hist = path("history.jsonl")
+hist = mod.dir_fd_for(path("hist"))
 oversized = '{"peer":"' + "y" * (mod.MAX_LINE + 10) + '"}'
-mod.write_private(hist, oversized + '\n{"ts":1,"direction":"in","peer":"sip:1@pbx"}\n')
-lines = mod.CallTracker(hist).read_lines()
-check("read_lines drops an oversized record", len(lines) == 1)
+mod.write_private(mod.HISTORY, oversized + '\n{"ts":1,"direction":"in","peer":"sip:1@pbx"}\n', hist)
+check("read_lines drops an oversized record", len(mod.CallTracker(hist).read_lines()) == 1)
 
 record = mod.history_record({
-    "ts": 1,
-    "direction": "in",
-    "peer": "sip:" + "z" * 10000,
-    "missed": True,
-    "duration": 10 ** 12,
-    "reason": "w" * 10000,
+    "ts": 1, "direction": "in", "peer": "sip:" + "z" * 10000,
+    "missed": True, "duration": 10 ** 12, "reason": "w" * 10000,
 })
 check("history_record clips overlong fields",
       len(record["peer"]) == mod.MAX_FIELD and len(record["reason"]) == mod.MAX_FIELD)
@@ -141,10 +188,9 @@ decoded = list(mod.NetstringDecoder().feed(b"%d:%s," % (len(payload), payload)))
 check("NetstringDecoder round-trips a normal payload", decoded == [payload])
 
 
-def feeds(data, limit=None):
-    dec = mod.NetstringDecoder() if limit is None else mod.NetstringDecoder(limit)
+def feeds(data):
     try:
-        list(dec.feed(data))
+        list(mod.NetstringDecoder().feed(data))
     except ValueError:
         return True
     return False
@@ -156,54 +202,46 @@ check("NetstringDecoder rejects a colon-less flood", feeds(b"1" * 64))
 check("NetstringDecoder rejects a non-numeric length", feeds(b"abc:xx,"))
 
 
-# ------------------------------------------------------------------- follow
+# ------------------------------------------------------------- socket bounds
 
-def drained(target, seconds=0.4, **kwargs):
-    """Collect whatever follow() yields within a short deadline."""
-    stream = mod.follow(target, deadline=time.monotonic() + seconds, **kwargs)
-    try:
-        return list(stream)
-    finally:
-        stream.close()
+a, b = socket.socketpair()
+b.sendall(b'{"a":1}\n' + b"z" * (mod.MAX_LINE + 10) + b'\n{"a":2}\n')
+b.close()
+lines = list(mod.read_lines(a, time.monotonic() + 2))
+a.close()
+check("stream drops an oversized record and resynchronises",
+      lines == ['{"a":1}', '{"a":2}'])
+
+# A client that never sends a newline must not grow the daemon's buffer.
+srv_dir = mod.dir_fd_for(path("run"))
+hub = mod.ControlHub(srv_dir)
+check("control socket is created 0600",
+      stat.S_IMODE(os.stat(path("run/control")).st_mode) == 0o600)
+client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+client.connect(f"/proc/self/fd/{srv_dir}/control")
+conn = hub.accept()
+client.sendall(b"x" * (mod.MAX_LINE + 4096))
+time.sleep(0.05)
+hub.read_commands(conn)
+check("a newline-less client cannot grow the daemon buffer",
+      len(hub.clients[conn]["buf"]) <= mod.MAX_LINE)
+client.sendall(b"tail\n" + b'{"command":"ok"}\n')
+time.sleep(0.05)
+check("the stream resynchronises at the next newline",
+      hub.read_commands(conn) == [b'{"command":"ok"}'])
+client.close()
+hub.close()
+check("closing the hub removes the socket", not os.path.exists(path("run/control")))
 
 
-journal = path("events")
-mod.write_private(journal, '{"a":1}\n{"a":2}\n')
-check("follow reads existing records from the start",
-      drained(journal, from_start=True) == ['{"a":1}', '{"a":2}'])
+# ------------------------------------------------------- connect, don't hang
 
-check("follow starts at EOF by default", drained(journal) == [])
-
-mod.write_private(journal, "z" * (mod.MAX_LINE + 10) + '\n{"a":3}\n')
-check("follow drops an oversized record and keeps the next",
-      drained(journal, from_start=True) == ['{"a":3}'])
-
-try:
-    drained(path("plain.link"), from_start=True)
-    check("follow refuses a symlinked journal", False)
-except OSError:
-    check("follow refuses a symlinked journal", True)
-
+mod.RUN_DIR = path("empty-run")
+mod._DIR_FDS.pop(mod.RUN_DIR, None)
 started = time.monotonic()
-drained(journal, seconds=0.3)
-check("follow honours its deadline instead of waiting forever",
-      time.monotonic() - started < 2.0)
-
-
-# ---------------------------------------------------------- write_fifo timing
-
-mod.FIFO = path("cmd")
-os.mkfifo(mod.FIFO, 0o600)
-started = time.monotonic()
-died = dies(mod.write_fifo, "ping")
-check("write_fifo fails fast with no reader on the other end",
-      died and time.monotonic() - started < 1.0)
-
-os.unlink(mod.FIFO)
-mod.write_private(mod.FIFO, "")
-check("write_fifo refuses a regular file in place of the FIFO",
-      dies(mod.write_fifo, "ping"))
-check("daemon_up is false when the FIFO is not a FIFO", mod.daemon_up() is False)
+check("daemon_up is false with nothing listening", mod.daemon_up() is False)
+check("connect_control fails fast rather than hanging",
+      dies(mod.connect_control) and time.monotonic() - started < 2.0)
 
 print("\nall passed" if not fails else f"\n{fails} FAILED")
 sys.exit(1 if fails else 0)

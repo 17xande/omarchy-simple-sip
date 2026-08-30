@@ -15,8 +15,11 @@ sys.modules["omarchy_sip"] = mod
 spec.loader.exec_module(mod)
 
 tmp = tempfile.mkdtemp()
-path = os.path.join(tmp, "history.jsonl")
-t = mod.CallTracker(path)
+# Everything is opened relative to a pinned directory descriptor now, so the
+# tracker takes one instead of a path.
+dir_fd = mod.dir_fd_for(tmp)
+path = os.path.join(tmp, mod.HISTORY)
+t = mod.CallTracker(dir_fd)
 
 # 1. outbound, answered
 t.handle({"type": "CALL_OUTGOING", "id": "a", "peeruri": "sip:1001@pbx"})
@@ -66,7 +69,7 @@ if len(got) != len(want):
     print(f"FAIL row count: got {len(got)}, want {len(want)}")
 
 # 7. the file must stay capped at the limit
-small = mod.CallTracker(os.path.join(tmp, "cap.jsonl"), limit=3)
+small = mod.CallTracker(dir_fd, "cap.jsonl", limit=3)
 for i in range(10):
     small.handle({"type": "CALL_OUTGOING", "id": str(i), "peeruri": f"sip:{i}@pbx"})
     small.handle({"type": "CALL_CLOSED", "id": str(i)})
