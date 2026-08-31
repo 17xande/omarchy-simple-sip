@@ -229,7 +229,7 @@ def open_dir_checked(name: str, dir_fd: int | None = None) -> int:
     return fd
 
 
-def pin_dir(path: str, leaf_mode: int = 0o700) -> int:
+def pin_dir(path: str, leaf_mode: int = 0o700, owned: bool = True) -> int:
     """Walk `path` from "/" one component at a time and return the leaf's fd.
 
     A descriptor is held at every step and the next component is opened
@@ -238,10 +238,16 @@ def pin_dir(path: str, leaf_mode: int = 0o700) -> int:
     in which another process running as this user can replace an intermediate
     directory and redirect everything underneath. Callers get the descriptor
     and do all their work relative to it.
+
+    `leaf_mode` is the mode a leaf is created with. It is also *enforced* on an
+    already-existing leaf, but only when `owned` -- pass owned=False for a
+    directory that merely happens to hold one of our files, so we never re-mode
+    somebody else's directory. See unit_fd().
     """
     fd = open_dir_checked("/")
     try:
         parts = [comp for comp in path.split("/") if comp]
+        created = False
         for depth, comp in enumerate(parts):
             last = depth == len(parts) - 1
             try:
@@ -251,10 +257,14 @@ def pin_dir(path: str, leaf_mode: int = 0o700) -> int:
                 # or narrowing somebody's ~/.config is not ours to decide. Only
                 # our own leaf is private.
                 os.mkdir(comp, leaf_mode if last else 0o755, dir_fd=fd)
+                created = last
                 nxt = open_dir_checked(comp, dir_fd=fd)
             os.close(fd)
             fd = nxt
-        if stat.S_IMODE(os.fstat(fd).st_mode) != leaf_mode:
+        # mkdir's mode is masked by the umask, so a leaf we just created still
+        # has to be set exactly. An *existing* leaf is only re-moded when it is
+        # ours: see dir_fd_for().
+        if (owned or created) and stat.S_IMODE(os.fstat(fd).st_mode) != leaf_mode:
             os.fchmod(fd, leaf_mode)     # on the fd: no pathname to re-resolve
         return fd
     except OSError as exc:
@@ -265,11 +275,11 @@ def pin_dir(path: str, leaf_mode: int = 0o700) -> int:
 _DIR_FDS: dict[str, int] = {}
 
 
-def dir_fd_for(path: str, leaf_mode: int = 0o700) -> int:
+def dir_fd_for(path: str, leaf_mode: int = 0o700, owned: bool = True) -> int:
     """Pin `path` once per process and reuse the descriptor thereafter."""
     fd = _DIR_FDS.get(path)
     if fd is None:
-        fd = _DIR_FDS[path] = pin_dir(path, leaf_mode)
+        fd = _DIR_FDS[path] = pin_dir(path, leaf_mode, owned)
     return fd
 
 
@@ -282,7 +292,14 @@ def run_fd() -> int:
 
 
 def unit_fd() -> int:
-    return dir_fd_for(UNIT_DIR, 0o755)
+    """Pin ~/.config/systemd/user -- but never re-mode it.
+
+    This directory is systemd's, not ours: we only drop one unit file into it.
+    Forcing a mode on a directory the plugin does not own would silently widen
+    a 0700 ~/.config/systemd/user to 0755 on every `status` poll. It is created
+    at the conventional 0755 if missing and otherwise left exactly as found.
+    """
+    return dir_fd_for(UNIT_DIR, 0o755, owned=False)
 
 
 def open_checked(
@@ -1046,12 +1063,13 @@ def cmd_history(args) -> int:
 
 def cmd_status(_args) -> int:
     up = daemon_up()
+    aor = account_aor()
     snapshot = {
         "installed": unit_installed(),
         "unitActive": systemctl("is-active", "--quiet", UNIT) == 0,
         "daemonUp": up,
-        "configured": bool(account_aor()),
-        "aor": account_aor(),
+        "configured": bool(aor),
+        "aor": aor,
         # Raw baresip responses, spliced in as objects so the consumer needs a
         # single parse. Pulling state out of the prose is Model.js's job.
         "reginfo": clip_reply(request("reginfo", timeout=3)) if up else None,

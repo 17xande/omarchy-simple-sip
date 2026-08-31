@@ -65,6 +65,18 @@ os.close(mod.pin_dir(path("fresh/nested")))
 check("pin_dir creates a missing leaf at 0700",
       stat.S_IMODE(os.stat(path("fresh/nested")).st_mode) == 0o700)
 
+# A directory we merely drop a file into -- ~/.config/systemd/user -- is not
+# ours to re-mode. Forcing 0755 on it would silently widen a user who keeps
+# their unit directory private, on every `status` poll.
+os.mkdir(path("borrowed"), 0o700)
+os.close(mod.pin_dir(path("borrowed"), 0o755, owned=False))
+check("pin_dir leaves an unowned existing leaf's mode alone",
+      stat.S_IMODE(os.stat(path("borrowed")).st_mode) == 0o700)
+
+os.close(mod.pin_dir(path("borrowed2"), 0o755, owned=False))
+check("pin_dir still creates a missing unowned leaf at its mode",
+      stat.S_IMODE(os.stat(path("borrowed2")).st_mode) == 0o755)
+
 mod.write_private("notadir", "", mod.dir_fd_for(path("real")))
 check("pin_dir refuses a plain file", dies(mod.pin_dir, path("real/notadir")))
 
