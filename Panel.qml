@@ -487,7 +487,10 @@ Panel {
     var uri = uriField.text.trim()
     if (uri === "") return
     if (uri.indexOf("sip:") !== 0) uri = "sip:" + uri
-    sip.setAccount(uri, authField.text.trim(), "", transportField.value, passwordField.text)
+    // A save already in flight refuses this one; keep the form (and the typed
+    // password) on screen rather than silently dropping it.
+    if (!sip.setAccount(uri, authField.text.trim(), "", transportField.value, passwordField.text))
+      return
     // Never keep the password in a live QML property.
     passwordField.text = ""
     setupOpen = false

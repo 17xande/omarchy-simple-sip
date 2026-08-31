@@ -160,8 +160,11 @@ Item {
   function startDaemon() { run(["start"]) }
 
   // Password goes over stdin so it never appears in a process listing.
+  // Returns false if a save is already in flight, so the caller knows not to
+  // clear the form -- dropping the typed password on the floor is worse than
+  // making the user press Save again.
   function setAccount(uri, authUser, displayName, transport, password) {
-    if (accountProcess.running) return
+    if (accountProcess.running) return false
     var args = [cli, "account", "set", uri]
     if (authUser) args = args.concat(["--auth-user", authUser])
     if (displayName) args = args.concat(["--display-name", displayName])
@@ -173,6 +176,7 @@ Item {
     accountWatchdog.restart()
     accountProcess.write(String(password || "") + "\n")
     accountProcess.stdinEnabled = false
+    return true
   }
 
   // ------------------------------------------------------------------ events

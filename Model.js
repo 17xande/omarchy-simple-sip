@@ -160,7 +160,7 @@ function inCall(callState) {
 // together. State is carried by colour and the ringing blink, not by shape,
 // except for in-call which gets the filled square so a glance tells you the
 // line is busy.
-function barGlyph(callState, ready) {
+function barGlyph(callState) {
   if (callState === "active") return "\uf098"   // nf-fa-phone_square
   return "\uf095"                             // nf-fa-phone
 }

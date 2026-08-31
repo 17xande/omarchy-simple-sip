@@ -174,6 +174,12 @@ Checking the descriptor rather than the pathname is what makes the check unracea
 and `O_NONBLOCK` is what stops a FIFO substituted for a regular file from parking a
 helper inside `open()`.
 
+`~/.config/systemd/user` gets the same treatment — the unit file is created and
+removed relative to a pinned descriptor, never by pathname. Its *mode*, though, is
+left exactly as found: that directory is systemd's, not this plugin's, and forcing a
+mode on it would silently widen a private one. Only the two directories the plugin
+owns have their mode enforced, and only downwards.
+
 ### Writes replace, they never truncate
 
 `O_NOFOLLOW` refuses a symlink but not a same-owner **hard link**. Opening
@@ -208,6 +214,15 @@ A process already running as your user can do anything you can do; none of the a
 is a boundary against *you*. What it defends is the narrower and more realistic case
 of a confused deputy — something that can create a file or a link in one of these
 directories persuading the daemon to read, write, or block on the wrong object.
+
+One gap is structural and worth naming. Quickshell's `Socket` takes a `path`, not a
+descriptor, so the **panel** connects to `$XDG_RUNTIME_DIR/omarchy-sip/control` by
+pathname and cannot pin the directory the way the daemon does. A process that won a
+race on that directory could stand up a decoy socket and the panel would talk to it.
+Nothing secret crosses that socket — the SIP password only ever travels on the CLI's
+stdin — so the reachable effect is spoofed call events in the panel and dial commands
+that go nowhere. The daemon side, which is where the credentials and the persistent
+state live, is pinned.
 
 ### Privileges
 
