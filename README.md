@@ -149,9 +149,15 @@ omarchy-sip account show | set | clear     account management
 not surface: `omarchy-sip cmd callstat`, `omarchy-sip cmd reginfo`,
 `omarchy-sip cmd listcalls`.
 
-Environment overrides: `OMARCHY_SIP_CONF` (config dir, default
-`~/.config/omarchy-sip`) and `OMARCHY_SIP_LISTEN` (SIP bind address, default
-`0.0.0.0:0` — set a fixed port only if your PBX requires one).
+Environment overrides:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `OMARCHY_SIP_CONF` | `~/.config/omarchy-sip` | Config directory |
+| `OMARCHY_SIP_LISTEN` | `0.0.0.0:0` | SIP bind address; set a fixed port only if your PBX requires one |
+| `OMARCHY_SIP_INTERFACE` | *(unset)* | Bind SIP to one interface, e.g. `wlp4s0`. Cuts the listener count substantially — see [The SIP listener](#the-sip-listener) — but defeats roaming, so it is off by default |
+
+Set them in the unit with `systemctl --user edit omarchy-sip`.
 
 ## Security notes
 
@@ -185,6 +191,33 @@ Within your own session, any process you run can still place calls, exactly as i
 can read your files. That is the same boundary every other Omarchy plugin has.
 - Like all Omarchy plugins, this runs unsandboxed inside the long-lived
   `omarchy-shell` process, with your user's permissions.
+
+### The SIP listener
+
+A registered softphone has to be reachable for inbound calls — that is the job, and
+it is a different thing from the control plane above. What arrives on the SIP port
+is an INVITE, which at worst makes the phone ring with a caller ID of the sender's
+choosing. It cannot place calls *from* your account, cannot read your credentials,
+and cannot drive the daemon; those all require the control socket, which is
+peer-credential checked. This is not the ctrl_tcp problem wearing a different hat.
+
+It is still more surface than it needs to be. baresip's default opens a listener for
+**every transport on every address it can see** — on a typical laptop that means
+udp, tcp *and* tls across wifi, `docker0`, bridges, veths and `tailscale0`, none of
+which have any business carrying SIP. On this machine that was 35 listeners.
+
+Two things narrow it:
+
+- **Automatic.** `sip_transports` is generated from the account, so only the
+  transport actually registering gets a listener — the registrar answers on the one
+  we registered over, so the other two are pure surface. 35 listeners → 13.
+- **Opt-in.** `OMARCHY_SIP_INTERFACE=wlp4s0` sets baresip's `net_interface`, binding
+  SIP to one interface. 13 → 4. This is *not* the default because it defeats
+  `netroam`: move between wifi and ethernet, or onto a different network, and calls
+  stop arriving until you change it. Set it if this machine does not roam.
+
+What remains — one transport on the interfaces you actually use — is the irreducible
+part. A phone that cannot be rung is not a phone.
 
 ### Directories and descriptors
 

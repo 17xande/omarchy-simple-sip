@@ -71,6 +71,14 @@ DBUS_PATH = "/baresip"
 # collide. Override for a direct-IP setup or a PBX that wants a known port.
 SIP_LISTEN = os.environ.get("OMARCHY_SIP_LISTEN", "0.0.0.0:0")
 
+# Optional: pin SIP to one interface. baresip otherwise opens a listener on
+# *every* address it can see -- including docker0, bridges, veths and
+# tailscale0, none of which have any business carrying SIP. Binding one
+# interface takes this machine from 13 listeners to 4, but it defeats netroam:
+# move between wifi and ethernet and calls stop arriving until it is changed.
+# So it is opt-in rather than the default. Empty means "all interfaces".
+SIP_INTERFACE = os.environ.get("OMARCHY_SIP_INTERFACE", "").strip()
+
 HOME = os.path.expanduser("~")
 DEFAULT_CONF_DIR = os.path.join(HOME, ".config/omarchy-sip")
 CONF_DIR = os.environ.get("OMARCHY_SIP_CONF", DEFAULT_CONF_DIR)
@@ -114,6 +122,13 @@ poll_method\t\tepoll
 
 sip_listen\t\t{listen}
 sip_verify_server\tyes
+
+# Only the transport this account actually registers with gets a listener.
+# baresip's default opens udp *and* tcp *and* tls on every address, which is
+# three times the inbound attack surface for no gain: the registrar answers on
+# the transport we registered over.
+sip_transports\t\t{transports}
+{interface}
 
 audio_player\t\tpulse,default
 audio_source\t\tpulse,default
@@ -397,17 +412,41 @@ def exists_at(name: str, dir_fd: int) -> bool:
         return False
 
 
+def account_transport() -> str:
+    """The transport this account registers with, for sip_transports.
+
+    Defaults to udp, which is both baresip's default and what an account with
+    no explicit transport= will use.
+    """
+    for line in read_bounded(ACCOUNTS, conf_fd(), MAX_ACCOUNTS_FILE).split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        for field in line.split(";")[1:]:
+            key, _, value = field.partition("=")
+            if key.strip() == "transport":
+                value = value.strip().strip('"').lower()
+                if value in ("udp", "tcp", "tls"):
+                    return value
+        break
+    return "udp"
+
+
 def ensure_config() -> None:
     fd = conf_fd()
     for name in (ACCOUNTS, CONTACTS):
         if not exists_at(name, fd):
             write_private(name, "", fd)
-    # Regenerated every start: the module list and control port are ours, not
-    # the user's, so a stale config can never quietly break calls.
+    interface = f"net_interface\t\t{SIP_INTERFACE}" if SIP_INTERFACE else ""
+    # Regenerated every start: the module list and the transport are ours, not
+    # the user's, so a stale config can never quietly break calls -- and the
+    # transport has to be re-derived whenever the account changes.
     write_private(
         CONFIG,
         BARESIP_CONFIG.format(
-            listen=SIP_LISTEN
+            listen=SIP_LISTEN,
+            transports=account_transport(),
+            interface=interface,
         ),
         fd,
     )
@@ -1290,8 +1329,10 @@ def cmd_account(args) -> int:
     entry += f";answermode=manual;regint={args.regint}"
     entry += ";audio_codecs=opus/48000/2,PCMU/8000/1,PCMA/8000/1"
 
-    ensure_config()
+    # Accounts first: ensure_config() derives sip_transports from it, so
+    # generating the config before the write would bake in the old transport.
     write_private(ACCOUNTS, entry + "\n", conf_fd())
+    ensure_config()
     print(f"omarchy-sip: account set to {args.uri}")
     restart_if_live()
     return 0
