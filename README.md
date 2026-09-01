@@ -14,8 +14,12 @@ does all the SIP, RTP and audio work.
 ## Requirements
 
 - `baresip` — `sudo pacman -S baresip` (in the official Arch repos)
+- `python-jeepney` — `sudo pacman -S python-jeepney` (official repos; 450 KiB, pure
+  Python, and its only dependency is `python` itself). The control helper speaks
+  D-Bus to baresip; jeepney is the client library.
 - PipeWire's PulseAudio interface (`pipewire-pulse`), which Omarchy ships by default
-- `python3` for the control helper (stdlib only, no pip packages)
+- `python3` for the control helper — stdlib plus jeepney, no pip packages and no
+  build step
 
 ## Install
 
@@ -82,9 +86,9 @@ is **not** free — Omarchy binds it to Google Photos.
 
 ## How it works
 
-baresip's `ctrl_tcp` module accepts **only one** control connection — its connect
-handler drops any existing client when a new one arrives. So a single daemon owns
-that socket and everything else goes through one unix socket:
+The daemon drives baresip over the **session D-Bus** (baresip's `ctrl_dbus` module,
+`com.github.Baresip` at `/baresip`) and re-exports that control surface on one unix
+socket, which is what everything else talks to:
 
 ```
 $XDG_RUNTIME_DIR/omarchy-sip/control   one JSON object per line, both directions
@@ -96,16 +100,18 @@ number of readers see the whole picture. The panel drives its state from *events
 (structured); the `status` snapshot exists only to resync after a shell restart,
 when the last registration event may be minutes old.
 
-A socket rather than a FIFO plus an on-disk journal is a deliberate security
-choice: nothing persistent has to be reopened by name to move a message, which
+D-Bus rather than baresip's `ctrl_tcp` is a deliberate security choice, covered
+under [Security notes](#the-control-plane). A socket rather than a FIFO plus an
+on-disk journal is another: nothing persistent has to be reopened by name to move a
+message, which
 removes the substitution and truncation races that come with re-resolving a
 pathname in a directory other local processes can write to.
 
 ```
 Panel.qml ──── Socket: $XDG_RUNTIME_DIR/omarchy-sip/control
                                     │
-                          omarchy-sip daemon ── owns the one ctrl_tcp connection
-                                    │
+                          omarchy-sip daemon
+                                    │ session D-Bus (com.github.Baresip)
                                  baresip ── SIP / RTP / audio
 ```
 
@@ -147,9 +153,29 @@ Environment overrides: `OMARCHY_SIP_CONF` (config dir, default
   than silently truncated.
 - Passwords are passed to the CLI on **stdin**, never as an argument, so they never
   appear in a process listing.
-- `ctrl_tcp` has no authentication. It binds `127.0.0.1` only — but that still means
-  any local process can place calls through the daemon. The daemon refuses to start
-  if that port is already held, rather than adopting somebody else's baresip.
+
+### The control plane
+
+baresip is driven over the **session D-Bus**, and `ctrl_tcp` is deliberately not
+loaded. `ctrl_tcp` is an unauthenticated TCP listener on loopback, which means it is
+reachable by every *other user* on the machine, not just you — and its connect
+handler drops the existing client whenever a new one arrives, so any local process
+could evict this daemon and take over the registered SIP account without racing
+anything. There is no way to authenticate it.
+
+The session bus has the properties ctrl_tcp lacks. Its socket lives in
+`$XDG_RUNTIME_DIR`, mode 0700, so it is unreachable across uids at the filesystem
+layer, and `dbus-daemon` authenticates every client with `SO_PEERCRED` (EXTERNAL
+auth) rather than trusting whoever connects. The daemon refuses to start if
+`com.github.Baresip` is already owned, rather than driving somebody else's baresip.
+
+The plugin's own control socket is checked the same way: it is 0600 inside a 0700
+pinned directory, and `accept()` additionally reads `SO_PEERCRED` and refuses any
+client that is not this uid — asking the kernel who is on the other end rather than
+inferring it from the permissions of a pathname.
+
+Within your own session, any process you run can still place calls, exactly as it
+can read your files. That is the same boundary every other Omarchy plugin has.
 - Like all Omarchy plugins, this runs unsandboxed inside the long-lived
   `omarchy-shell` process, with your user's permissions.
 
@@ -249,8 +275,10 @@ cat $XDG_RUNTIME_DIR/omarchy-sip/baresip.log
 qs log -p /usr/share/omarchy/shell --tail 100    # QML errors
 ```
 
-If the daemon refuses to start with *"control port already in use"*, another
-baresip is holding `127.0.0.1:44510`; the daemon deliberately will not adopt it.
+If the daemon refuses to start with *"com.github.Baresip is already owned"*,
+another baresip is running and exporting the control interface; the daemon
+deliberately will not adopt it. Find it with
+`busctl --user status com.github.Baresip`.
 
 ## Hacking on it
 
