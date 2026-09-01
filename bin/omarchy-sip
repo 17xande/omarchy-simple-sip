@@ -769,7 +769,7 @@ class BaresipBus:
 
     def __init__(self) -> None:
         if open_dbus_connection is None:
-            die("python-jeepney is not installed (pacman -S python-jeepney)")
+            die("python-jeepney is not installed (omarchy pkg add python-jeepney)")
         self.addr = DBusAddress(DBUS_PATH, bus_name=DBUS_NAME, interface=DBUS_NAME)
         self.conn = open_dbus_connection(bus="SESSION")
         self.conn.sock.setblocking(False)
@@ -868,9 +868,9 @@ def bus_name_taken() -> bool:
 
 def cmd_daemon(_args) -> int:
     if not shutil.which("baresip"):
-        die("baresip is not installed (pacman -S baresip)")
+        die("baresip is not installed (omarchy pkg add baresip)")
     if open_dbus_connection is None:
-        die("python-jeepney is not installed (pacman -S python-jeepney)")
+        die("python-jeepney is not installed (omarchy pkg add python-jeepney)")
     global _HUB
     ensure_config()
     rfd = run_fd()
