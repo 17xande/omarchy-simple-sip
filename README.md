@@ -13,13 +13,20 @@ does all the SIP, RTP and audio work.
 
 ## Requirements
 
-- `baresip` — `sudo pacman -S baresip` (in the official Arch repos)
-- `python-jeepney` — `sudo pacman -S python-jeepney` (official repos; 450 KiB, pure
-  Python, and its only dependency is `python` itself). The control helper speaks
-  D-Bus to baresip; jeepney is the client library.
-- PipeWire's PulseAudio interface (`pipewire-pulse`), which Omarchy ships by default
-- `python3` for the control helper — stdlib plus jeepney, no pip packages and no
-  build step
+Two packages, both in the official Arch repos:
+
+```bash
+omarchy pkg add baresip python-jeepney
+```
+
+- **`baresip`** — does all the SIP, RTP and audio work.
+- **`python-jeepney`** — 450 KiB, pure Python, and its only dependency is `python`
+  itself. The control helper drives baresip over D-Bus; jeepney is the client
+  library.
+
+Already present on any Omarchy install, listed for completeness: PipeWire's
+PulseAudio interface (`pipewire-pulse`) and `python3`. The control helper is
+stdlib plus jeepney — no pip packages, no build step, no compiled binary.
 
 ## Install
 
@@ -252,8 +259,11 @@ state live, is pinned.
 
 ### Privileges
 
-The plugin never invokes `sudo` and never calls a package manager. `pacman -S baresip`
-in [Requirements](#requirements) is an instruction for you to run. `systemctl` is only
+The plugin never invokes `sudo` and never calls a package manager, and it has no
+install hook — the `omarchy pkg add` line in [Requirements](#requirements) is an
+instruction for you to run, not something this code executes. (Underneath, that
+wrapper is `sudo pacman -S --needed`; naming it here rather than hiding it, since
+installing the two dependencies genuinely does need root.) `systemctl` is only
 ever called as `systemctl --user` and only ever names this plugin's own unit,
 `omarchy-sip.service`.
 
