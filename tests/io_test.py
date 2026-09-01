@@ -193,6 +193,32 @@ check("clip_reply caps baresip prose",
 check("clip_reply passes a non-dict through as None", mod.clip_reply("nope") is None)
 
 
+# ------------------------------------------------------- account transport
+
+# sip_transports is derived from the account so baresip only opens a listener
+# for the transport actually in use, instead of udp+tcp+tls on every address.
+
+acct = mod.dir_fd_for(path("acct"))
+orig_conf, mod.CONF_DIR = mod.CONF_DIR, path("acct")
+
+
+def transport_for(line):
+    mod.write_private(mod.ACCOUNTS, line, acct)
+    return mod.account_transport()
+
+
+check("transport defaults to udp when unset",
+      transport_for('<sip:a@b>;regint=600\n') == "udp")
+check("transport is read from the account", transport_for('<sip:a@b>;transport=tls\n') == "tls")
+check("transport tcp is read", transport_for('<sip:a@b>;transport=tcp\n') == "tcp")
+check("an unknown transport falls back to udp",
+      transport_for('<sip:a@b>;transport=sctp\n') == "udp")
+check("a comment line is skipped", transport_for('# note\n<sip:a@b>;transport=tcp\n') == "tcp")
+check("an empty accounts file is udp", transport_for("") == "udp")
+
+mod.CONF_DIR = orig_conf
+
+
 # --------------------------------------------------------- command dispatch
 
 # The client wire protocol is unchanged from the ctrl_tcp days, but it is now
