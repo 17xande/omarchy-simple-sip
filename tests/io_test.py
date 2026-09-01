@@ -193,25 +193,37 @@ check("clip_reply caps baresip prose",
 check("clip_reply passes a non-dict through as None", mod.clip_reply("nope") is None)
 
 
-# ------------------------------------------------------------ netstring bounds
+# --------------------------------------------------------- command dispatch
 
-payload = b'{"event":true}'
-decoded = list(mod.NetstringDecoder().feed(b"%d:%s," % (len(payload), payload)))
-check("NetstringDecoder round-trips a normal payload", decoded == [payload])
+# The client wire protocol is unchanged from the ctrl_tcp days, but it is now
+# flattened into a single ctrl_dbus command string. Nothing a client sends may
+# smuggle a second command past the join.
+
+class FakeBus:
+    def __init__(self):
+        self.calls = []
+
+    def invoke(self, line, token):
+        self.calls.append((line, token))
 
 
-def feeds(data):
-    try:
-        list(mod.NetstringDecoder().feed(data))
-    except ValueError:
-        return True
-    return False
+def dispatched(raw):
+    bus = FakeBus()
+    mod.dispatch(bus, raw)
+    return bus.calls
 
 
-check("NetstringDecoder rejects an oversized declared length",
-      feeds(b"%d:" % (mod.MAX_LINE + 1)))
-check("NetstringDecoder rejects a colon-less flood", feeds(b"1" * 64))
-check("NetstringDecoder rejects a non-numeric length", feeds(b"abc:xx,"))
+check("dispatch joins command and params",
+      dispatched(b'{"command":"dial","params":"sip:a@b","token":"t"}')
+      == [("dial sip:a@b", "t")])
+check("dispatch handles a command with no params",
+      dispatched(b'{"command":"hangup"}') == [("hangup", "")])
+check("dispatch ignores a newline in the command name",
+      dispatched(b'{"command":"dial\\nquit","params":"x"}') == [])
+check("dispatch ignores malformed JSON", dispatched(b"not json") == [])
+check("dispatch ignores a non-object", dispatched(b'["dial"]') == [])
+check("dispatch clips an overlong token",
+      len(dispatched(b'{"command":"x","token":"' + b"z" * 500 + b'"}')[0][1]) == 128)
 
 
 # ------------------------------------------------------------- socket bounds
