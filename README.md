@@ -22,7 +22,9 @@ omarchy pkg add baresip python-jeepney
 - **`baresip`** — does all the SIP, RTP and audio work.
 - **`python-jeepney`** — 450 KiB, pure Python, and its only dependency is `python`
   itself. The control helper drives baresip over D-Bus; jeepney is the client
-  library.
+  library. Install it from the repos, not `pip install --user`: the helper runs
+  as `#!/usr/bin/python3 -I`, and isolated mode deliberately ignores the user
+  site directory, so a `--user` install would not be importable.
 
 Already present on any Omarchy install, listed for completeness: PipeWire's
 PulseAudio interface (`pipewire-pulse`) and `python3`. The control helper is
@@ -194,6 +196,28 @@ Within your own session, any process you run can still place calls, exactly as i
 can read your files. That is the same boundary every other Omarchy plugin has.
 - Like all Omarchy plugins, this runs unsandboxed inside the long-lived
   `omarchy-shell` process, with your user's permissions.
+
+### What gets executed
+
+Everything this plugin spawns runs inside a long-lived shell process whose
+environment it does not control, so nothing it executes is chosen by that
+environment. Binaries are resolved from a fixed list of root-owned system
+directories (`/usr/local/bin`, `/usr/bin`, `/bin`) and never from `$PATH`. The
+helper's shebang is `#!/usr/bin/python3 -I` — absolute, so no version-manager shim
+or writable `PATH` entry picks the interpreter, and isolated, so `PYTHONPATH`,
+`PYTHONHOME` and the user site directory cannot inject code into it.
+
+Every process the panel launches sets `clearEnvironment: true` and receives only
+`HOME`, `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS`, `LANG`, a fixed `PATH`, and
+this plugin's own `OMARCHY_SIP_*` overrides. baresip — the process that holds the
+SIP credentials — gets a six-variable allowlist rather than the ~185 it would
+inherit. The `systemd --user` unit runs the interpreter isolated, pins `PATH`, and
+carries `UnsetEnvironment=PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONUSERBASE
+LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT`, because a user unit otherwise inherits the
+user manager's environment, which the user can add to via `environment.d`. An
+already-installed unit is content-compared against the generated one on every
+`start`/`restart` and rewritten if it has drifted, so this reaches existing
+installs rather than only new ones.
 
 ### The SIP listener
 

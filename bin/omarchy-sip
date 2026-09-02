@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/python3 -I
 """omarchy-sip -- control surface for the Simple SIP Omarchy plugin.
 
 baresip does all the SIP/RTP/audio work. This script drives it over the session
@@ -42,7 +42,6 @@ import re
 import secrets
 import select
 import selectors
-import shutil
 import signal
 import socket
 import stat
@@ -99,6 +98,33 @@ CONTROL = "control"
 UNIT = "omarchy-sip.service"
 
 SELF = os.path.abspath(__file__)
+
+# Absolute paths to the distro binaries, never bare names resolved through
+# PATH. Everything here runs inside a long-lived shell process whose
+# environment this plugin does not control: a writable PATH entry, or
+# PYTHONPATH/PYTHONHOME/LD_PRELOAD, would otherwise decide which interpreter
+# and which `systemctl`/`baresip` the credential-bearing daemon actually runs.
+# The shebang is `/usr/bin/python3 -I` for the same reason -- absolute, and
+# isolated so PYTHON* variables and the user site directory are ignored.
+# Resolved from a fixed list of root-owned system directories, never from
+# $PATH. The list is the same one CHILD_PATH hands to children, so a baresip
+# built into /usr/local/bin still works -- what is excluded is a caller's own
+# PATH deciding which binary this runs.
+TRUSTED_BIN_DIRS = ("/usr/local/bin", "/usr/bin", "/bin")
+
+
+def trusted_bin(name: str) -> str | None:
+    """First executable `name` in a trusted directory, or None."""
+    for directory in TRUSTED_BIN_DIRS:
+        candidate = os.path.join(directory, name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+PYTHON = trusted_bin("python3") or sys.executable
+SYSTEMCTL = trusted_bin("systemctl") or "/usr/bin/systemctl"
+BARESIP = trusted_bin("baresip")
 
 # ------------------------------------------------------------------- ceilings
 #
@@ -180,7 +206,15 @@ Wants=pipewire-pulse.service
 
 [Service]
 Type=simple
-ExecStart={python} {self} daemon
+# Absolute interpreter, isolated (-I) so PYTHONPATH/PYTHONHOME and the user
+# site directory cannot redirect what this runs. A `systemd --user` service
+# inherits the user manager's environment, which the user can add to
+# (environment.d, `systemctl --user import-environment`), so the variables
+# that would otherwise choose an interpreter or preload a library are
+# explicitly cleared rather than trusted.
+ExecStart={python} -I {self} daemon
+Environment=PATH={path}
+UnsetEnvironment=PYTHONPATH PYTHONHOME PYTHONSTARTUP PYTHONUSERBASE LD_PRELOAD LD_LIBRARY_PATH LD_AUDIT
 Restart=always
 RestartSec=3
 # baresip is a child of the daemon; take the whole group down on stop.
@@ -457,20 +491,45 @@ def ensure_config() -> None:
 def unit_python() -> str:
     """Interpreter to bake into the unit.
 
-    A `#!/usr/bin/env python3` shebang can resolve to a version manager's shim
-    (mise, pyenv, asdf), which would leave the service pointing at an
-    interpreter that can disappear under it. Prefer the distro python, which is
-    always present on Arch, and only fall back to whatever is running us.
+    A relative or `env`-resolved interpreter can land on a version manager's
+    shim (mise, pyenv, asdf) that disappears under the service, or on whatever
+    a writable PATH entry points at. The distro python is always present on
+    Arch and is the only thing baked in here; there is deliberately no
+    fallback to `sys.executable`, because a process started through a
+    redirected interpreter would otherwise persist that choice into the unit.
     """
-    return "/usr/bin/python3" if os.path.exists("/usr/bin/python3") else sys.executable
+    if trusted_bin("python3") is None:
+        die("no python3 in /usr/local/bin, /usr/bin or /bin -- cannot write a unit")
+    return PYTHON
+
+
+def unit_text() -> str:
+    return UNIT_TEMPLATE.format(self=SELF, python=unit_python(), path=CHILD_PATH)
 
 
 def write_unit() -> None:
-    write_file(
-        UNIT, UNIT_TEMPLATE.format(self=SELF, python=unit_python()), unit_fd(), 0o644
-    )
+    write_file(UNIT, unit_text(), unit_fd(), 0o644)
     if systemctl("daemon-reload") != 0:
         die("systemctl --user daemon-reload failed")
+
+
+def sync_unit() -> bool:
+    """Rewrite the installed unit whenever it differs from what we generate.
+
+    Without this a hardened unit only ever reaches a fresh install: `start`
+    skips writing when a unit already exists and `restart` never wrote one, so
+    everybody who installed before a change keeps running the old ExecStart --
+    the interpreter flags and the environment scrubbing in the template would
+    be a silent no-op for exactly the people who already trusted the plugin.
+    Content-compared rather than versioned so any drift is repaired, including
+    a hand-edit. Returns True when it rewrote.
+    """
+    if not unit_installed():
+        return False
+    if read_bounded(UNIT, unit_fd()) == unit_text():
+        return False
+    write_unit()
+    return True
 
 
 def unit_installed() -> bool:
@@ -497,13 +556,29 @@ def systemctl(*args: str) -> int:
     """
     try:
         return subprocess.run(
-            ["systemctl", "--user", *args],
+            [SYSTEMCTL, "--user", *args],
             timeout=SYSTEMCTL_TIMEOUT,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         ).returncode
     except subprocess.TimeoutExpired:
         return -1
+
+
+# The only variables baresip actually needs: XDG_RUNTIME_DIR to find the
+# PipeWire/Pulse socket and the session bus, DBUS_SESSION_BUS_ADDRESS for
+# ctrl_dbus when it is set explicitly, HOME because libraries expect one, and
+# a fixed PATH. Everything else -- PYTHON*, LD_PRELOAD, LD_LIBRARY_PATH, and
+# whatever else happens to be in a long-lived shell's environment -- is
+# dropped rather than handed to the process that holds the SIP credentials.
+CHILD_PATH = "/usr/local/bin:/usr/bin:/bin"
+CHILD_ENV_KEYS = ("XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "HOME", "USER", "LANG")
+
+
+def child_env() -> dict[str, str]:
+    env = {k: os.environ[k] for k in CHILD_ENV_KEYS if k in os.environ}
+    env["PATH"] = CHILD_PATH
+    return env
 
 
 def clip(value, limit: int = MAX_FIELD) -> str:
@@ -953,7 +1028,7 @@ def cap_baresip_log(log_fd: int, limit: int = MAX_BARESIP_LOG) -> None:
 
 
 def cmd_daemon(_args) -> int:
-    if not shutil.which("baresip"):
+    if BARESIP is None:
         die("baresip is not installed (omarchy pkg add baresip)")
     if open_dbus_connection is None:
         die("python-jeepney is not installed (omarchy pkg add python-jeepney)")
@@ -987,10 +1062,11 @@ def cmd_daemon(_args) -> int:
     cfd = conf_fd()
     os.set_inheritable(cfd, True)
     baresip = subprocess.Popen(
-        ["baresip", "-f", f"/proc/self/fd/{cfd}"],
+        [BARESIP, "-f", f"/proc/self/fd/{cfd}"],
         stdout=log_fd,
         stderr=subprocess.STDOUT,
         pass_fds=(cfd,),
+        env=child_env(),
     )
 
     def shutdown(*_):
@@ -1285,6 +1361,8 @@ def cmd_start(_args) -> int:
         write_unit()
         if systemctl("enable", UNIT) != 0:
             die(f"systemctl enable {UNIT} failed")
+    else:
+        sync_unit()
     ensure_config()
     return systemctl("start", UNIT)
 
@@ -1294,6 +1372,7 @@ def cmd_stop(_args) -> int:
 
 
 def cmd_restart(_args) -> int:
+    sync_unit()
     ensure_config()
     return systemctl("restart", UNIT)
 

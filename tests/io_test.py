@@ -7,7 +7,7 @@ following, blocking, or buffering without limit.
 
 Run: python3 tests/io_test.py
 """
-import contextlib, importlib.machinery, importlib.util, io, json, os, socket, stat, sys, tempfile, time
+import contextlib, importlib.machinery, importlib.util, io, json, os, socket, stat, subprocess, sys, tempfile, time
 
 spec = importlib.util.spec_from_loader(
     "omarchy_sip",
@@ -191,6 +191,120 @@ reply = mod.clip_reply({"data": "d" * (mod.MAX_REPLY_CHARS * 2), "ok": True})
 check("clip_reply caps baresip prose",
       len(reply["data"]) == mod.MAX_REPLY_CHARS and reply["ok"] is True)
 check("clip_reply passes a non-dict through as None", mod.clip_reply("nope") is None)
+
+
+# ------------------------------------------------------------ execution trust
+
+# The CLI runs inside a long-lived shell process whose environment it does not
+# control. Nothing it executes may be chosen by that environment: not the
+# interpreter, not systemctl, not baresip.
+
+CLI = os.path.join(os.path.dirname(__file__), "..", "bin", "omarchy-sip")
+
+with open(CLI, "rb") as fh:
+    shebang = fh.readline().decode().strip()
+check("the shebang names an absolute interpreter", shebang.startswith("#!/usr/bin/python3"))
+check("the shebang runs Python isolated (-I)", shebang.endswith(" -I"))
+check("no bare-name execution of the distro binaries",
+      mod.SYSTEMCTL == "/usr/bin/systemctl" and mod.BARESIP == "/usr/bin/baresip"
+      and mod.PYTHON == "/usr/bin/python3")
+check("the unit bakes in the absolute interpreter", mod.unit_python() == "/usr/bin/python3")
+
+# trusted_bin resolves from a fixed list of root-owned directories, so a
+# source-built binary in /usr/local/bin still works while $PATH never decides.
+check("trusted_bin finds a real binary", mod.trusted_bin("sh") in ("/usr/bin/sh", "/bin/sh"))
+check("trusted_bin returns None for a binary that is not there",
+      mod.trusted_bin("definitely-not-a-real-binary-xyz") is None)
+check("trusted_bin ignores $PATH entirely",
+      mod.TRUSTED_BIN_DIRS == ("/usr/local/bin", "/usr/bin", "/bin"))
+
+# sync_unit repairs an installed unit that predates a template change --
+# otherwise hardening only ever reaches a fresh install.
+unit_dir = path("unitsync")
+saved_unit_dir, mod.UNIT_DIR = mod.UNIT_DIR, unit_dir
+# Stub systemctl: write_unit() daemon-reloads, and these suites must stay
+# dependency-free (no running user manager, e.g. in a container).
+saved_systemctl, mod.systemctl = mod.systemctl, lambda *a: 0
+mod._DIR_FDS.pop(saved_unit_dir, None)
+try:
+    ufd = mod.unit_fd()
+    check("sync_unit does nothing when no unit is installed", mod.sync_unit() is False)
+    mod.write_file(mod.UNIT, "[Service]\nExecStart=/usr/bin/python3 /old daemon\n", ufd, 0o644)
+    check("sync_unit rewrites a stale unit", mod.sync_unit() is True)
+    check("... to exactly the generated content",
+          mod.read_bounded(mod.UNIT, ufd) == mod.unit_text())
+    check("sync_unit is a no-op once the unit already matches", mod.sync_unit() is False)
+finally:
+    mod._DIR_FDS.pop(unit_dir, None)
+    mod.UNIT_DIR = saved_unit_dir
+    mod.systemctl = saved_systemctl
+
+unit = mod.UNIT_TEMPLATE.format(self="/x/omarchy-sip", python=mod.PYTHON, path=mod.CHILD_PATH)
+check("the unit runs the interpreter isolated",
+      "ExecStart=/usr/bin/python3 -I /x/omarchy-sip daemon" in unit)
+check("the unit pins PATH", f"Environment=PATH={mod.CHILD_PATH}" in unit)
+for var in ("PYTHONPATH", "PYTHONHOME", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT"):
+    check(f"the unit clears {var}", var in unit.split("UnsetEnvironment=")[1].split("\n")[0])
+
+# child_env(): an allowlist, so a hostile variable is dropped rather than
+# forwarded into the process that holds the SIP credentials.
+hostile = {
+    "PYTHONPATH": "/tmp/evil", "PYTHONHOME": "/tmp/evil", "LD_PRELOAD": "/tmp/evil.so",
+    "LD_LIBRARY_PATH": "/tmp/evil", "LD_AUDIT": "/tmp/evil.so", "PATH": "/tmp/evil",
+    "HOME": "/home/real", "XDG_RUNTIME_DIR": "/run/user/1000",
+}
+saved = dict(os.environ)
+try:
+    os.environ.clear()
+    os.environ.update(hostile)
+    env = mod.child_env()
+finally:
+    os.environ.clear()
+    os.environ.update(saved)
+
+for var in ("PYTHONPATH", "PYTHONHOME", "LD_PRELOAD", "LD_LIBRARY_PATH", "LD_AUDIT"):
+    check(f"child_env drops a hostile {var}", var not in env)
+check("child_env replaces a hostile PATH with the fixed one", env["PATH"] == mod.CHILD_PATH)
+check("child_env keeps the variables baresip genuinely needs",
+      env["HOME"] == "/home/real" and env["XDG_RUNTIME_DIR"] == "/run/user/1000")
+
+# End to end: run the real CLI with a hostile environment and a PATH whose
+# first entry shadows systemctl and baresip with a saboteur, and check that
+# neither the interpreter nor those binaries were taken from it.
+evil = tempfile.mkdtemp(dir=tmp)   # under tmp so it is cleaned up with everything else
+marker = os.path.join(evil, "fired")
+for name in ("systemctl", "baresip", "python3"):
+    shim = os.path.join(evil, name)
+    with open(shim, "w") as fh:
+        fh.write(f"#!/bin/sh\necho {name} >> {marker}\nexit 0\n")
+    os.chmod(shim, 0o755)
+
+# `status` is the right probe: it is the one subcommand that shells out to
+# systemctl, so a shim on PATH would actually be reached if PATH were trusted.
+# Its runtime dir is redirected too, so this never touches a live daemon.
+probe = subprocess.run(
+    [CLI, "status"],
+    env={"PATH": evil, "PYTHONPATH": evil, "PYTHONHOME": evil, "LD_PRELOAD": "/nonexistent.so",
+         "HOME": os.environ.get("HOME", "/tmp"), "OMARCHY_SIP_CONF": path("envtest"),
+         "XDG_RUNTIME_DIR": path("envrun")},
+    capture_output=True, text=True, timeout=30,
+)
+check("the CLI still runs under a hostile PATH/PYTHONPATH/LD_PRELOAD", probe.returncode == 0)
+check("... and produced real output, not a shim's",
+      probe.stdout.startswith("{") and '"installed"' in probe.stdout)
+check("... and never executed a shadowed systemctl from that PATH",
+      not os.path.exists(marker))
+
+# Positive control. "the marker file was not written" is only evidence if the
+# shims are reachable in the first place -- otherwise it passes for any reason
+# at all, including a typo in the shim path. Run something that *does* resolve
+# through PATH under the identical environment and assert the shim fires.
+control = subprocess.run(
+    ["/bin/sh", "-c", "systemctl --user is-active nothing.service"],
+    env={"PATH": evil}, capture_output=True, text=True, timeout=30,
+)
+check("positive control: a bare name under that PATH really does hit the shim",
+      os.path.exists(marker) and "systemctl" in open(marker).read())
 
 
 # ---------------------------------------------------------- baresip log cap
