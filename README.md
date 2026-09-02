@@ -115,12 +115,15 @@ removes the substitution and truncation races that come with re-resolving a
 pathname in a directory other local processes can write to.
 
 ```
-Panel.qml ──── Socket: $XDG_RUNTIME_DIR/omarchy-sip/control
-                                    │
-                          omarchy-sip daemon
-                                    │ session D-Bus (com.github.Baresip)
-                                 baresip ── SIP / RTP / audio
+Panel.qml ── omarchy-sip events (subprocess) ── control socket ── omarchy-sip daemon
+                                                                          │ session D-Bus
+                                                                       baresip ── SIP/RTP/audio
 ```
+
+The panel talks to that socket through `omarchy-sip` as a subprocess rather than
+connecting to it directly — `events` for the long-lived stream, `send` for
+dial/accept/hangup — which is covered under
+[Security notes](#the-control-plane) alongside why.
 
 `Model.js` holds every pure function (event mapping, URI completion, duration
 formatting, and the one place that scrapes baresip's prose output). `Service.qml`
@@ -281,14 +284,17 @@ is a boundary against *you*. What it defends is the narrower and more realistic 
 of a confused deputy — something that can create a file or a link in one of these
 directories persuading the daemon to read, write, or block on the wrong object.
 
-One gap is structural and worth naming. Quickshell's `Socket` takes a `path`, not a
-descriptor, so the **panel** connects to `$XDG_RUNTIME_DIR/omarchy-sip/control` by
-pathname and cannot pin the directory the way the daemon does. A process that won a
-race on that directory could stand up a decoy socket and the panel would talk to it.
-Nothing secret crosses that socket — the SIP password only ever travels on the CLI's
-stdin — so the reachable effect is spoofed call events in the panel and dial commands
-that go nowhere. The daemon side, which is where the credentials and the persistent
-state live, is pinned.
+The panel does not connect to the control socket directly. Quickshell's `Socket`
+takes a `path`, not a descriptor, so a direct connection would resolve the pathname
+fresh every time and could not pin the directory the way the daemon does — and its
+`SplitParser` has no byte ceiling, so a peer that never sends a newline would grow
+its buffer inside the long-lived shell process without bound. Both close if the
+panel instead talks through `omarchy-sip` as a subprocess: `events` for the
+long-lived stream, `send` for dial/accept/hangup. The CLI resolves the socket
+through the same pinned runtime-directory descriptor the daemon walks, and
+`read_lines()` bounds every record before anything is handed to QML, exactly as it
+already did for `omarchy-sip status`/`history`. The cost is one always-running child
+process where a raw socket would have needed none.
 
 ### Privileges
 

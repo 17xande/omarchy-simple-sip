@@ -155,6 +155,7 @@ Panel {
     iconComponent: Component {
       Item {
         Text {
+          textFormat: Text.PlainText
           anchors.centerIn: parent
           text: Model.barGlyph(sip.callState)
           color: sip.ringing ? (root.bar ? root.bar.urgent : Color.urgent)
@@ -246,6 +247,7 @@ Panel {
             iconOpacity: sip.ready || sip.onCall ? 1.0 : 0.5
             iconComponent: Component {
               Text {
+                textFormat: Text.PlainText
                 text: Model.barGlyph(sip.callState)
                 color: sip.ringing ? root.urgent : root.foreground
                 font.family: root.fontFamily
@@ -256,6 +258,7 @@ Panel {
 
           // ---------- error / last outcome ----------
           Text {
+            textFormat: Text.PlainText
             visible: text !== ""
             width: parent.width
             text: sip.lastError !== "" ? sip.lastError
@@ -275,6 +278,7 @@ Panel {
             spacing: Style.space(2)
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               text: Model.callTitle(sip.snapshot)
               color: sip.ringing ? root.urgent : root.dim
@@ -283,6 +287,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               text: Model.peerShort(sip.peer) || "unknown"
               color: root.foreground
@@ -292,6 +297,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               visible: text !== ""
               text: {
@@ -306,6 +312,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               visible: sip.callState === "active"
               text: Model.durationText(sip.callStartedAt, clock.now)
@@ -410,6 +417,7 @@ Panel {
             }
 
             Text {
+              textFormat: Text.PlainText
               width: parent.width
               text: "Credentials are written to ~/.config/omarchy-sip/accounts (0600)."
               color: root.dim
@@ -545,6 +553,7 @@ Panel {
       spacing: Style.space(8)
 
       Text {
+        textFormat: Text.PlainText
         text: actionRow.action ? actionRow.action.glyph : ""
         color: actionRow.tint
         font.family: root.fontFamily
@@ -557,6 +566,7 @@ Panel {
         spacing: Style.space(1)
 
         Text {
+          textFormat: Text.PlainText
           Layout.fillWidth: true
           text: actionRow.action ? actionRow.action.label : ""
           color: root.foreground
@@ -566,6 +576,7 @@ Panel {
         }
 
         Text {
+          textFormat: Text.PlainText
           Layout.fillWidth: true
           visible: text !== ""
           text: actionRow.action && actionRow.action.meta ? actionRow.action.meta : ""
