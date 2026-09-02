@@ -7,7 +7,7 @@ following, blocking, or buffering without limit.
 
 Run: python3 tests/io_test.py
 """
-import contextlib, importlib.machinery, importlib.util, io, os, socket, stat, sys, tempfile, time
+import contextlib, importlib.machinery, importlib.util, io, json, os, socket, stat, sys, tempfile, time
 
 spec = importlib.util.spec_from_loader(
     "omarchy_sip",
@@ -193,6 +193,70 @@ check("clip_reply caps baresip prose",
 check("clip_reply passes a non-dict through as None", mod.clip_reply("nope") is None)
 
 
+# ---------------------------------------------------------- baresip log cap
+
+# subprocess.Popen(stdout=log_fd) dup2s our fd into baresip, so the two share
+# one open file description -- including the offset. ftruncate+lseek on our
+# copy must therefore rotate the file baresip is still writing to, in place,
+# with no reopen by either side.
+
+def logcap(path_, before, limit):
+    fd = os.open(path_, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.write(fd, before)
+    mod.cap_baresip_log(fd, limit=limit)
+    size_after_cap = os.fstat(fd).st_size
+    os.write(fd, b"next")   # simulates baresip's next write via the shared fd
+    os.close(fd)
+    return size_after_cap, open(path_, "rb").read()
+
+
+logp = path("baresip.log")
+check("cap_baresip_log leaves a file under the limit alone",
+      logcap(logp, b"x" * 50, 100) == (50, b"x" * 50 + b"next"))
+after, content = logcap(logp, b"x" * 500, 100)
+check("cap_baresip_log truncates a file over the limit", after == 0)
+check("... and the next write lands at the front of the now-empty file",
+      content == b"next")
+
+
+# ------------------------------------------------------------ account fields
+
+# baresip's accounts file is ';'-delimited, one line per account. A field that
+# reached it unbounded or carrying a newline, ';' or '"' could grow the file
+# without limit or splice a second, attacker-chosen account line into it.
+
+check("account_field accepts an ordinary value",
+      mod.account_field("x", "sip:you@pbx.example.com") == "sip:you@pbx.example.com")
+check("account_field rejects a value over its limit",
+      dies(mod.account_field, "x", "a" * 300))
+check("account_field accepts exactly the limit", mod.account_field("x", "a" * 256) == "a" * 256)
+for bad in ("\n", "\r", ";", '"'):
+    check(f"account_field rejects an embedded {bad!r}", dies(mod.account_field, "x", f"a{bad}b"))
+
+# read_password_from_stdin: bounded by bytes, not only by the wall-clock
+# deadline -- a writer that keeps the pipe open and keeps sending must not be
+# able to grow the buffer past the limit no matter how long it writes for.
+
+def password_from(data, limit=64):
+    r, w = os.pipe()
+    os.write(w, data)
+    os.close(w)
+    old_stdin = sys.stdin
+    try:
+        sys.stdin = os.fdopen(r)
+        return mod.read_password_from_stdin(timeout=1.0, limit=limit)
+    finally:
+        sys.stdin = old_stdin
+
+
+check("read_password_from_stdin reads an ordinary password",
+      password_from(b"hunter2\n") == "hunter2")
+check("read_password_from_stdin caps a password with no newline at all",
+      len(password_from(b"a" * 500)) == 64)
+check("read_password_from_stdin caps a password past the limit even with a newline",
+      len(password_from(b"a" * 500 + b"\n")) == 64)
+
+
 # ------------------------------------------------------- account transport
 
 # sip_transports is derived from the account so baresip only opens a listener
@@ -222,8 +286,11 @@ mod.CONF_DIR = orig_conf
 # --------------------------------------------------------- command dispatch
 
 # The client wire protocol is unchanged from the ctrl_tcp days, but it is now
-# flattened into a single ctrl_dbus command string. Nothing a client sends may
-# smuggle a second command past the join.
+# flattened into a single ctrl_dbus command string that runs through baresip's
+# own command-line grammar. A command name outside the fixed allowlist, or a
+# parameter that does not match that command's own grammar, must be refused
+# rather than forwarded -- including a parameter that tries to smuggle a
+# second command past the join with a newline or a ';'.
 
 class FakeBus:
     def __init__(self):
@@ -233,23 +300,58 @@ class FakeBus:
         self.calls.append((line, token))
 
 
+class FakeHub:
+    def __init__(self):
+        self.rejections = []
+
+    def broadcast(self, text):
+        self.rejections.append(json.loads(text))
+
+
 def dispatched(raw):
-    bus = FakeBus()
-    mod.dispatch(bus, raw)
-    return bus.calls
+    bus, hub = FakeBus(), FakeHub()
+    mod.dispatch(bus, hub, raw)
+    return bus.calls, hub.rejections
 
 
-check("dispatch joins command and params",
+check("dispatch joins a dial command and its target",
       dispatched(b'{"command":"dial","params":"sip:a@b","token":"t"}')
-      == [("dial sip:a@b", "t")])
-check("dispatch handles a command with no params",
-      dispatched(b'{"command":"hangup"}') == [("hangup", "")])
-check("dispatch ignores a newline in the command name",
-      dispatched(b'{"command":"dial\\nquit","params":"x"}') == [])
-check("dispatch ignores malformed JSON", dispatched(b"not json") == [])
-check("dispatch ignores a non-object", dispatched(b'["dial"]') == [])
-check("dispatch clips an overlong token",
-      len(dispatched(b'{"command":"x","token":"' + b"z" * 500 + b'"}')[0][1]) == 128)
+      == ([("dial sip:a@b", "t")], []))
+check("dispatch handles a no-parameter command",
+      dispatched(b'{"command":"hangup"}') == ([("hangup", "")], []))
+check("dispatch allows every command this plugin actually issues",
+      all(dispatched(('{"command":"%s"}' % c).encode())[0] == [(c, "")]
+          for c in ("accept", "hangup", "reginfo", "listcalls")))
+
+calls, rejections = dispatched(b'{"command":"quit","token":"t"}')
+check("dispatch refuses a command outside the allowlist", calls == [])
+check("... and tells the caller so", rejections == [
+    {"response": True, "ok": False, "data": "command not permitted", "token": "t"}])
+
+check("dispatch refuses a newline smuggled into dial's target",
+      dispatched(b'{"command":"dial","params":"sip:a@b\nquit","token":"t"}')[0] == [])
+check("dispatch refuses a target with no sip(s): scheme",
+      dispatched(b'{"command":"dial","params":"a@b","token":"t"}')[0] == [])
+check("dispatch refuses a semicolon smuggled into dial's target",
+      dispatched(b'{"command":"dial","params":"sip:a@b;quit","token":"t"}')[0] == [])
+check("dispatch refuses a quote smuggled into dial's target",
+      dispatched(b'{"command":"dial","params":"sip:a@b' + b'"' + b'quit","token":"t"}')[0] == [])
+check("dispatch refuses a space in dial's target",
+      dispatched(b'{"command":"dial","params":"sip:a@b quit","token":"t"}')[0] == [])
+check("dispatch allows a feature code",
+      dispatched(b'{"command":"dial","params":"sip:*43@pbx","token":"t"}')[0]
+      == [("dial sip:*43@pbx", "t")])
+check("dispatch allows an explicit port",
+      dispatched(b'{"command":"dial","params":"sip:b@x.com:5080","token":"t"}')[0]
+      == [("dial sip:b@x.com:5080", "t")])
+check("dispatch refuses a no-parameter command that was given one anyway",
+      dispatched(b'{"command":"hangup","params":"sip:a@b","token":"t"}')[0] == [])
+check("dispatch ignores malformed JSON", dispatched(b"not json") == ([], []))
+check("dispatch ignores a non-object", dispatched(b'["dial"]') == ([], []))
+check("dispatch clips an overlong token on the accepted path",
+      len(dispatched(b'{"command":"hangup","token":"' + b"z" * 500 + b'"}')[0][0][1]) == 128)
+check("dispatch clips an overlong token on the rejected path",
+      len(dispatched(b'{"command":"quit","token":"' + b"z" * 500 + b'"}')[1][0]["token"]) == 128)
 
 
 # ------------------------------------------------------------- socket bounds

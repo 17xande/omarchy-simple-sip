@@ -29,11 +29,17 @@ Item {
   readonly property string pluginDir: Qt.resolvedUrl(".").toString().replace("file://", "").replace(/\/+$/, "")
   readonly property string cli: pluginDir + "/bin/omarchy-sip"
 
-  // The daemon's control socket. Connecting to it directly means the panel no
-  // longer keeps a long-lived `omarchy-sip events` subprocess alive just to
-  // hear about calls, and commands go straight down the same connection.
-  readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR") || "/run/user/1000"
-  readonly property string controlPath: runtimeDir + "/omarchy-sip/control"
+  // Events and commands both go through the CLI as a subprocess rather than a
+  // QML Socket connected to the control path directly. Two things Quickshell
+  // does not give QML a way to do itself: SplitParser has no byte ceiling, so
+  // a peer that never sends a newline grows its buffer in this long-lived
+  // shell process without bound; and a plain `path` string is resolved fresh
+  // on connect, so it does not benefit from the pinned-descriptor resolution
+  // the daemon uses for everything else. `read_lines()` in the CLI already
+  // enforces MAX_LINE per record before anything is printed, and it resolves
+  // the socket through the same pinned runtime-directory descriptor the
+  // daemon itself walks -- so routing through it closes both gaps at once,
+  // at the cost of one always-running child process instead of none.
 
   // ------------------------------------------------------------------ state
   property bool installed: false
@@ -73,6 +79,12 @@ Item {
   readonly property int statusRefreshSec: intSetting("statusRefreshSec", 60, 10, 600)
   readonly property int historyLimit: intSetting("historyLimit", 5, 0, 20)
 
+  // Backoff for respawning the `events` subprocess while the daemon is
+  // unreachable -- each retry is a Python interpreter start, not a syscall.
+  readonly property int eventsRetryMinMs: 3000
+  readonly property int eventsRetryMaxMs: 30000
+  property int eventsRetryMs: eventsRetryMinMs
+
   function setting(name, fallback) {
     var value = settings ? settings[name] : undefined
     return value === undefined || value === null ? fallback : value
@@ -106,26 +118,26 @@ Item {
     historyWatchdog.restart()
   }
 
+  // Returns false when another action is already in flight, so a caller that
+  // needs to know whether its command actually went out (dial's optimistic UI)
+  // can fall back to a resync instead of assuming it did.
   function run(args) {
-    if (actionProcess.running) return
+    if (actionProcess.running) return false
     lastError = ""
     actionProcess.errText = ""
     actionProcess.command = [cli].concat(args)
     actionProcess.running = true
     actionWatchdog.restart()
+    return true
   }
 
-  // One JSON object per line, straight down the control socket -- no process,
-  // no FIFO, nothing on disk in the path of a keypress.
+  // `omarchy-sip send` -- fire-and-forget, one line down the control socket --
+  // as a short subprocess rather than a direct QML Socket write. The CLI
+  // resolves the socket through the daemon's own pinned directory descriptor
+  // instead of a bare path string, and the existing action watchdog and
+  // bounded error buffer come for free.
   function command(name, params) {
-    if (!control.connected) {
-      lastError = "Not connected to the SIP daemon"
-      return false
-    }
-    var obj = { command: name, token: "panel" }
-    if (params) obj.params = params
-    control.write(JSON.stringify(obj) + "\n")
-    return true
+    return run(params ? ["send", name, params] : ["send", name])
   }
 
   // Keeps a bounded prefix of a process's diagnostic output. Called per line,
@@ -147,14 +159,18 @@ Item {
     if (!command("dial", target)) refresh()
   }
 
+  // Mirrors dial(): a caller that fires while another action is still in
+  // flight (a double press on answer/hangup, or two calls to the IpcHandler
+  // back to back) must not have its command silently dropped with the UI
+  // left showing a call state that no longer matches what actually happened.
   function answer() {
     if (callState !== "incoming") return
-    command("accept")
+    if (!command("accept")) refresh()
   }
 
   function hangup() {
     if (callState === "idle") return
-    command("hangup")
+    if (!command("hangup")) refresh()
   }
 
   function startDaemon() { run(["start"]) }
@@ -200,6 +216,9 @@ Item {
 
     if (update.kind === "ctrl") {
       daemonUp = update.connected
+      if (update.connected) {
+        eventsRetryMs = eventsRetryMinMs   // a real connection means the daemon is back
+      }
       if (!update.connected) {
         callState = "idle"
         peer = ""
@@ -291,25 +310,43 @@ Item {
 
   // Long-lived: a bar widget is loaded for the whole shell session, so this is
   // the always-on listener that makes an inbound call ring even with the panel
-  // closed. A socket rather than a subprocess reading a journal file, so there
-  // is no child process to supervise and nothing on disk to re-resolve.
-  Socket {
-    id: control
-    path: root.controlPath
-    connected: true
-    parser: SplitParser { onRead: function(line) { root.handleLine(line) } }
-    onConnectionStateChanged: {
-      if (connected) {
-        root.refresh()
-      } else {
-        root.daemonUp = false
-        reconnectTimer.restart()
-      }
-    }
-    onError: function(err) {
+  // closed. `omarchy-sip events` connects to the control socket and prints one
+  // bounded, newline-terminated JSON line per record (or nothing at all for an
+  // oversized one) -- see read_lines() in the CLI -- so SplitParser here only
+  // ever sees data our own bounded reader already produced.
+  Process {
+    id: eventsProcess
+    running: false
+    command: []
+    stdinEnabled: false
+    stdout: SplitParser { onRead: function(line) { root.handleLine(line) } }
+    onRunningChanged: if (running) root.refresh()
+    onExited: function(exitCode) {
       root.daemonUp = false
-      reconnectTimer.restart()
+      // Each retry is a Python interpreter start, not a syscall the way the
+      // old raw-socket reconnect was, so a daemon that stays down (not
+      // installed yet, stopped for troubleshooting) must not keep spawning
+      // one every few seconds indefinitely. Back off, capped, and reset the
+      // moment a connection actually succeeds -- see the "ctrl" branch above.
+      eventsRetryMs = Math.min(eventsRetryMs * 2, eventsRetryMaxMs)
+      eventsRestartTimer.interval = eventsRetryMs
+      eventsRestartTimer.restart()
     }
+  }
+
+  function startEvents() {
+    if (eventsProcess.running) return
+    eventsProcess.command = [cli, "events"]
+    eventsProcess.running = true
+  }
+
+  // The socket only exists while the daemon runs, and `events` exits as soon
+  // as it does (or immediately, if nothing is listening yet). Retry with
+  // backoff rather than hammering a spawn every 3s for as long as it is down.
+  Timer {
+    id: eventsRestartTimer
+    interval: eventsRetryMinMs
+    onTriggered: root.startEvents()
   }
 
   // The one place a whole document is needed, so StdioCollector stays -- but
@@ -446,17 +483,6 @@ Item {
     }
   }
 
-  // The socket only exists while the daemon runs, so the connection drops
-  // whenever it restarts. Retry steadily rather than giving up.
-  Timer {
-    id: reconnectTimer
-    interval: 3000
-    onTriggered: {
-      if (!control.connected) control.connected = true
-      root.refresh()
-    }
-  }
-
   Timer {
     id: accountSettleTimer
     interval: 2500
@@ -472,5 +498,8 @@ Item {
     onTriggered: root.refresh()
   }
 
-  Component.onCompleted: refresh()
+  Component.onCompleted: {
+    startEvents()
+    refresh()
+  }
 }
