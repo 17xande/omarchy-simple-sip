@@ -29,6 +29,36 @@ Item {
   readonly property string pluginDir: Qt.resolvedUrl(".").toString().replace("file://", "").replace(/\/+$/, "")
   readonly property string cli: pluginDir + "/bin/omarchy-sip"
 
+  // Every child this file launches gets an explicit, minimal environment
+  // rather than the shell's. `bin/omarchy-sip` is `#!/usr/bin/python3 -I`, so
+  // the interpreter is absolute and isolated already, but the loader still
+  // reads LD_PRELOAD/LD_LIBRARY_PATH from whatever omarchy-shell happens to
+  // have inherited, and a writable PATH entry would decide which `systemctl`
+  // the CLI finds. `clearEnvironment: true` plus these four keys is the whole
+  // surface: HOME and XDG_RUNTIME_DIR locate the config and runtime
+  // directories, DBUS_SESSION_BUS_ADDRESS lets `systemctl --user` reach the
+  // user manager, and PATH is fixed rather than inherited.
+  readonly property string cleanPath: "/usr/local/bin:/usr/bin:/bin"
+
+  // The OMARCHY_SIP_* keys are this plugin's own documented overrides and have
+  // to be forwarded: the daemon runs under `systemd --user`, which still sees
+  // them, so dropping them here would leave the panel reading
+  // ~/.config/omarchy-sip while the daemon reads OMARCHY_SIP_CONF -- the panel
+  // would report "no account", write credentials to the wrong directory, and
+  // restart a daemon that never sees them. They select configuration, not code:
+  // the directory they name is still pinned and ownership-checked like any
+  // other, so forwarding them costs nothing the execution-trust rule protects.
+  function cleanEnv() {
+    var env = { "PATH": cleanPath }
+    var keys = ["HOME", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "LANG",
+                "OMARCHY_SIP_CONF", "OMARCHY_SIP_LISTEN", "OMARCHY_SIP_INTERFACE"]
+    for (var i = 0; i < keys.length; i++) {
+      var value = Quickshell.env(keys[i])
+      if (value) env[keys[i]] = String(value)
+    }
+    return env
+  }
+
   // Events and commands both go through the CLI as a subprocess rather than a
   // QML Socket connected to the control path directly. Two things Quickshell
   // does not give QML a way to do itself: SplitParser has no byte ceiling, so
@@ -266,11 +296,15 @@ Item {
     // Critical urgency so it survives Do Not Disturb -- a missed call is worse
     // than an interruption, and the notification is the only cue when the
     // panel is closed.
-    Quickshell.execDetached([
-      "notify-send", "-u", "critical", "-a", "Simple SIP",
-      "-i", "call-start-symbolic",
-      "Incoming call", peerUri || "unknown caller"
-    ])
+    Quickshell.execDetached({
+      command: [
+        "/usr/bin/notify-send", "-u", "critical", "-a", "Simple SIP",
+        "-i", "call-start-symbolic",
+        "Incoming call", peerUri || "unknown caller"
+      ],
+      environment: root.cleanEnv(),
+      clearEnvironment: true
+    })
   }
 
   function applyStatus(text) {
@@ -318,6 +352,8 @@ Item {
     id: eventsProcess
     running: false
     command: []
+    clearEnvironment: true
+    environment: root.cleanEnv()
     stdinEnabled: false
     stdout: SplitParser { onRead: function(line) { root.handleLine(line) } }
     onRunningChanged: if (running) root.refresh()
@@ -356,6 +392,8 @@ Item {
     id: historyProcess
     running: false
     command: []
+    clearEnvironment: true
+    environment: root.cleanEnv()
     stdout: StdioCollector { id: historyOut; waitForEnd: true }
     onExited: function(exitCode) {
       historyWatchdog.stop()
@@ -381,6 +419,8 @@ Item {
     id: statusProcess
     running: false
     command: []
+    clearEnvironment: true
+    environment: root.cleanEnv()
     stdout: StdioCollector { id: statusOut; waitForEnd: true }
     // No stderr parser: with none set Quickshell discards the stream, which is
     // what we want here -- nothing read it, and collecting it only retained it.
@@ -398,6 +438,8 @@ Item {
     property string errText: ""
     running: false
     command: []
+    clearEnvironment: true
+    environment: root.cleanEnv()
     stdout: SplitParser {
       onRead: function(line) { actionProcess.errText = root.appendBounded(actionProcess.errText, line) }
     }
@@ -419,6 +461,8 @@ Item {
     property string errText: ""
     running: false
     command: []
+    clearEnvironment: true
+    environment: root.cleanEnv()
     stdinEnabled: true
     stdout: SplitParser {
       onRead: function(line) { accountProcess.errText = root.appendBounded(accountProcess.errText, line) }
