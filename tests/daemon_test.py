@@ -69,14 +69,14 @@ check("...clickable, and with Answer and Reject buttons",
 check("...at critical urgency", kw["urgency"] == 2 and kw["category"] == "call.incoming")
 
 alerts.action("call:c1", "answer")
-check("the Answer button accepts the call in baresip", invoked == ["accept"])
+check("the Answer button accepts that call, by its id", invoked == ["accept c1"])
 alerts.action("call:c1", "reject")
-check("the Reject button hangs it up", invoked == ["accept", "hangup"])
+check("the Reject button hangs that call up, by its id", invoked == ["accept c1", "hangup c1"])
 alerts.action("call:c1", "default")
-check("clicking the notification asks the panel to open", invoked == ["accept", "hangup", "SHOW"])
+check("clicking the notification asks the panel to open", invoked == ["accept c1", "hangup c1", "SHOW"])
 invoked.remove("SHOW")
 alerts.action("call:zz", "answer")
-check("a button for a call that is not ringing does nothing", invoked == ["accept", "hangup"])
+check("a button for a call that is not ringing does nothing", invoked == ["accept c1", "hangup c1"])
 
 alerts.handle({"type": "CALL_ESTABLISHED", "id": "c1"})
 check("answering closes the notification", n.closed == ["call:c1"])
@@ -84,7 +84,12 @@ alerts.handle({"type": "CALL_CLOSED", "id": "c1"})
 check("an answered call leaves no Missed call behind",
       [s[1] for s in n.sent] == ["Incoming call"])
 alerts.action("call:c1", "answer")
-check("a button pressed after the call ended does nothing", invoked == ["accept", "hangup"])
+check("a button pressed after the call ended does nothing", invoked == ["accept c1", "hangup c1"])
+
+alerts, n, invoked, _, _ = make()
+alerts.handle({"type": "CALL_INCOMING", "id": "a b", "peeruri": "sip:1@pbx"})
+alerts.action("call:a b", "answer")
+check("a call whose id cannot be named on a command line is not acted on blind", invoked == [])
 
 alerts, n, _, _, _ = make()
 alerts.handle({"type": "CALL_INCOMING", "id": "c2", "peeruri": "sip:2002@pbx"})
@@ -284,17 +289,38 @@ check("with DND off nothing is rejected",
       not mod.dnd_reject(ev, dict(mod.OPTION_DEFAULTS), tracker, sent.append) and sent == [])
 check("an outgoing call is never rejected",
       not mod.dnd_reject({"type": "CALL_OUTGOING", "id": "x"}, opts, tracker, sent.append) and sent == [])
-for hostile in ("abc scode=200", "abc\nquit", "abc;x", "", "a" * 200, "abc def"):
+for hostile in ("abc scode=200", "abc\nquit", "abc;x", "", "a" * 300, "abc def", 'a"b', "a=b"):
     sent.clear()
     check(f"a Call-ID of {hostile[:20]!r} is never put on baresip's command line",
           not mod.dnd_reject({"type": "CALL_INCOMING", "id": hostile}, opts, tracker, sent.append)
           and sent == [])
 check("...and never falls back to a bare hangup, which could end another call", sent == [])
+t2 = mod.CallTracker(dfd, "h2.jsonl")
+ev2 = {"type": "CALL_INCOMING", "id": "a b", "peeruri": "sip:9@pbx"}
+t2.handle(ev2)
+mod.dnd_reject(ev2, opts, t2, sent.append)
+t2.handle({"type": "CALL_CLOSED", "id": "a b"})
+row2 = json.loads(open(os.path.join(dtmp, "h2.jsonl")).read().strip())
+check("a call DND could not turn away is not logged as DND", row2["reason"] != "DND")
+sent.clear()
+check("RFC 3261 punctuation in a Call-ID is still rejected by id",
+      mod.dnd_reject({"type": "CALL_INCOMING", "id": "abc/def(1)@host"}, opts, tracker, sent.append)
+      and sent == ["hangup abc/def(1)@host scode=480"])
 
 alerts, n, _, _, options = make(dnd=True)
-alerts.handle({"type": "CALL_INCOMING", "id": "q", "peeruri": "sip:1@pbx"})
+alerts.handle({"type": "CALL_INCOMING", "id": "q", "peeruri": "sip:1@pbx"}, quiet=True)
 alerts.handle({"type": "CALL_CLOSED", "id": "q"})
-check("under DND nothing is notified, during or after", n.sent == [])
+check("a call turned away under DND is not notified, during or after", n.sent == [])
+alerts.handle({"type": "CALL_INCOMING", "id": "r b", "peeruri": "sip:1@pbx"}, quiet=False)
+check("one DND could not turn away rings through and is notified", len(n.sent) == 1)
+
+cfg_dir = tempfile.mkdtemp()
+orig = mod.CONF_DIR
+mod.CONF_DIR = cfg_dir
+mod.ensure_config()
+check("the generated config allows one call at a time",
+      "call_max_calls\t\t1" in open(os.path.join(cfg_dir, "config")).read())
+mod.CONF_DIR = orig
 
 # ------------------------------------------------------- echo cancellation
 

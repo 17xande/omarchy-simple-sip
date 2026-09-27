@@ -3,7 +3,7 @@
 const fs = require("fs");
 const src = fs.readFileSync(require("path").join(__dirname, "..", "Model.js"), "utf8");
 const M = {};
-new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,typingGuard,isKeypadKey,parseMwi,validDigits,queueDigits,optionChanges,pickOptions,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,accountUri,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,barTooltip,lastOutbound,callTitle,domainOf,historyGlyph,parseHistory,contactName,matchContacts,redialTarget,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
+new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,validCallId,typingGuard,isKeypadKey,parseMwi,validDigits,queueDigits,optionChanges,pickOptions,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,accountUri,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,barTooltip,lastOutbound,callTitle,domainOf,historyGlyph,parseHistory,contactName,matchContacts,redialTarget,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
 
 let fails = 0;
 const ESC = String.fromCharCode(27);
@@ -96,6 +96,7 @@ t("classify rtcp ignored", M.classifyEvent({ type: "CALL_RTCP" }), null);
 t("classify sdp ignored", M.classifyEvent({ type: "CALL_LOCAL_SDP" }), null);
 t("classify closed", M.classifyEvent({ type: "CALL_CLOSED", param: "Rejected by user" }),
   { kind: "call", callState: "idle", peer: "", callId: "", closedReason: "Rejected by user" });
+t("classify closed keeps the call id", M.classifyEvent({ type: "CALL_CLOSED", id: "c9", param: "x" }).callId, "c9");
 t("classify reg ok", M.classifyEvent({ type: "REGISTER_OK", accountaor: "sip:a@x" }),
   { kind: "registration", registration: "registered", aor: "sip:a@x" });
 t("classify ctrl up", M.classifyEvent({ type: "CTRL_CONNECTED" }), { kind: "ctrl", connected: true });
@@ -188,6 +189,15 @@ t("guard lets a key through after quiet", M.typingGuard(2000, 1500, 1500), { swa
 t("guard unarmed", M.typingGuard(5, 0, 1500), { swallow: false, until: 0 });
 t("keypad keys", ["0", "9", "*", "#"].every(M.isKeypadKey), true);
 t("letters are not keypad keys", ["a", "A", "d", "12", ""].some(M.isKeypadKey), false);
+t("call id plain", M.validCallId("a84b4c76e66710@pbx.example.com"), true);
+t("call id rfc punctuation", M.validCallId("abc/def(1)<x>{y}?[z]"), true);
+t("call id refuses space", M.validCallId("abc scode=200"), false);
+t("call id refuses =", M.validCallId("a=b"), false);
+t("call id refuses ;", M.validCallId("a;b"), false);
+t("call id refuses quote", M.validCallId('a"b'), false);
+t("call id refuses backslash", M.validCallId("a\\b"), false);
+t("call id refuses newline", M.validCallId("ab\n"), false);
+t("call id refuses empty", M.validCallId(""), false);
 t("duration 95s", M.durationText(1000, 1000 + 95000), "01:35");
 t("duration hours", M.durationText(1, 1 + 3725000), "1:02:05");
 t("duration unset", M.durationText(0, 5000), "");

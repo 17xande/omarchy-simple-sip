@@ -337,15 +337,21 @@ Item {
   // flight (a double press on answer/hangup, or two calls to the IpcHandler
   // back to back) must not have its command silently dropped with the UI
   // left showing a call state that no longer matches what actually happened.
+  // Name the call when its id is known and nameable, so the command can only
+  // ever reach the call on screen; baresip's "current call" otherwise.
+  function callParam() {
+    return Model.validCallId(callId) ? callId : ""
+  }
+
   function answer() {
     if (callState !== "incoming") return "no call is ringing"
-    if (!command("accept")) { refresh(); return "too many commands queued" }
+    if (!command("accept", callParam())) { refresh(); return "too many commands queued" }
     return ""
   }
 
   function hangup() {
     if (callState === "idle") return "no call in progress"
-    if (!command("hangup")) { refresh(); return "too many commands queued" }
+    if (!command("hangup", callParam())) { refresh(); return "too many commands queued" }
     return ""
   }
 
@@ -367,7 +373,7 @@ Item {
     pendingToggle = { kind: "hold", previous: onHold }
     toggleTimer.restart()
     onHold = next
-    if (!command(next ? "hold" : "resume")) { onHold = !next; return "too many commands queued" }
+    if (!command(next ? "hold" : "resume", callParam())) { onHold = !next; return "too many commands queued" }
     return ""
   }
 
@@ -592,9 +598,14 @@ Item {
       return
     }
 
-    // Under Do Not Disturb the daemon turns an incoming call away within
-    // milliseconds; ringing for it here would only flash the panel open.
-    if (update.kind === "call" && update.callState === "incoming" && dnd) return
+    // A call the daemon turned away under Do Not Disturb is never sent here,
+    // so nothing needs filtering on the panel's (possibly stale) idea of it.
+    //
+    // One call at a time: while a call is up, events naming another call are
+    // not about the one on screen. (The daemon refuses a second call; this
+    // keeps a stray one from rewriting what the panel shows.)
+    if (update.kind === "call" && callState !== "idle" && update.callId && callId
+        && update.callId !== callId) return
 
     if (update.kind === "call") {
       lastCallEventAt = Date.now()

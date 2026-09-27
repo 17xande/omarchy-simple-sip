@@ -529,7 +529,16 @@ check("dispatch allows an explicit port",
       dispatched(b'{"command":"dial","params":"sip:b@x.com:5080","token":"t"}')[0]
       == [("dial sip:b@x.com:5080", "t")])
 check("dispatch refuses a no-parameter command that was given one anyway",
-      dispatched(b'{"command":"hangup","params":"sip:a@b","token":"t"}')[0] == [])
+      dispatched(b'{"command":"reginfo","params":"x","token":"t"}')[0] == [])
+check("dispatch accepts and hangs up a named call",
+      dispatched(b'{"command":"accept","params":"a84b4c76@pbx"}')[0] == [("accept a84b4c76@pbx", "")]
+      and dispatched(b'{"command":"hangup","params":"a84b4c76@pbx"}')[0] == [("hangup a84b4c76@pbx", "")])
+check("dispatch refuses a call id carrying a second parameter",
+      all(dispatched(('{"command":"hangup","params":"%s"}' % v).encode())[0] == []
+          for v in ("abc scode=200", "abc=1", "abc;quit", "abc\\\\x")))
+check("dispatch refuses a trailing newline that $ alone would have let through",
+      dispatched(json.dumps({"command": "mute", "params": "yes\n"}).encode())[0] == [("mute yes", "")]
+      and mod._COMMAND_GRAMMAR["mute"].fullmatch("yes\n") is None)
 check("dispatch allows mute with an explicit state",
       dispatched(b'{"command":"mute","params":"yes"}')[0] == [("mute yes", "")]
       and dispatched(b'{"command":"mute","params":"no"}')[0] == [("mute no", "")])
@@ -539,8 +548,9 @@ check("dispatch refuses mute with anything else",
 check("dispatch allows hold and resume with no parameter",
       dispatched(b'{"command":"hold"}')[0] == [("hold", "")]
       and dispatched(b'{"command":"resume"}')[0] == [("resume", "")])
-check("dispatch refuses hold given a call id",
-      dispatched(b'{"command":"hold","params":"abc"}')[0] == [])
+check("dispatch holds a named call", dispatched(b'{"command":"hold","params":"abc"}')[0] == [("hold abc", "")])
+check("dispatch refuses hold with anything that is not a call id",
+      dispatched(b'{"command":"hold","params":"abc def"}')[0] == [])
 check("dispatch sends DTMF digits",
       dispatched(b'{"command":"sndcode","params":"123*#"}')[0] == [("sndcode 123*#", "")])
 check("dispatch refuses DTMF with anything a keypad does not have",

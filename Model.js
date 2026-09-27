@@ -84,7 +84,7 @@ function classifyEvent(ev) {
   case "CALL_ESTABLISHED":
     return { kind: "call", callState: "active", peer: peer, callId: (ev && ev.id) || "", started: true }
   case "CALL_CLOSED":
-    return { kind: "call", callState: "idle", peer: "", callId: "",
+    return { kind: "call", callState: "idle", peer: "", callId: (ev && ev.id) || "",
              closedReason: String((ev && ev.param) || "") }
   }
   return null
@@ -224,6 +224,14 @@ var TARGET_RE = /^sips?:[A-Za-z0-9._~:\/@%+*#-]{1,250}$/
 
 function validTarget(uri) {
   return TARGET_RE.test(String(uri || ""))
+}
+
+// A Call-ID the daemon will accept as the first token of accept/hangup/hold/
+// resume -- printable ASCII without space, "=", ";", quotes or backslash;
+// mirrors CALL_ID in the CLI. Naming the call means a command can only ever
+// act on the call the panel is showing.
+function validCallId(id) {
+  return /^[!#-&(-:<>-\[\]-~]{1,256}$/.test(String(id || ""))
 }
 
 // The address of record the setup form saves. People type the server they
