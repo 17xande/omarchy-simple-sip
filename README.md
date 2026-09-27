@@ -89,6 +89,8 @@ directory too to remove every trace, including the stored SIP password.
 | Call | type an extension or `sip:user@host`, press Enter | — | `omarchy-shell io.github.17xande.simple-sip dial sip:1001@pbx` |
 | Answer | click **Answer** | `a` | `omarchy-shell io.github.17xande.simple-sip answer` |
 | Reject / hang up | click **Reject** / **Hang up** | `d` / `b` | `omarchy-shell io.github.17xande.simple-sip hangup` |
+| Mute / unmute | click **Mute** during a call | `m` | `omarchy-shell io.github.17xande.simple-sip mute` |
+| Hold / resume | click **Hold** during an answered call | `x` | `omarchy-shell io.github.17xande.simple-sip hold` |
 | Account settings | click the gear row | `s` | — |
 
 A bare extension or phone number is completed with your account's domain, so `1001`
@@ -369,8 +371,6 @@ ever called as `systemctl --user` and only ever names this plugin's own unit,
 
 ## Not in this version
 
-- No mute — baresip's `menu` module exposes no mute command, so it would mean
-  muting the system input device instead of just the call.
 - No DTMF keypad, no multiple accounts, no call transfer or hold.
 - Direct IP-to-IP calls need a reachable interface; baresip refuses loopback
   destinations with `no laddr for 127.0.0.1`.

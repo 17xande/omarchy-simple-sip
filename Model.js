@@ -338,11 +338,13 @@ function heroMeta(state) {
 
 function callTitle(state) {
   var s = state || {}
+  var title = ""
   switch (s.callState) {
   case "incoming": return "Incoming call"
-  case "outgoing": return "Calling…"
-  case "ringing":  return "Ringing…"
-  case "active":   return "In call"
+  case "outgoing": title = "Calling…"; break
+  case "ringing":  title = "Ringing…"; break
+  case "active":   title = s.onHold ? "On hold" : "In call"; break
+  default: return ""
   }
-  return ""
+  return s.muted ? title + " · Muted" : title
 }

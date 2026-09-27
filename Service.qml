@@ -86,6 +86,12 @@ Item {
   property double callStartedAt: 0
   property string lastError: ""
   property string lastClosedReason: ""
+  // Tracked here, not reported: baresip emits no event for either. Both
+  // belong to the current call and are cleared whenever it changes.
+  property bool muted: false
+  property bool onHold: false
+  // The last optimistic mute/hold change, so a refusal can put it back.
+  property var pendingToggle: null
   // Which of the two sources spoke last. A status snapshot is a request/reply
   // round trip, so its answer can predate a call event that arrived while it
   // was in flight -- comparing these is what keeps applyStatus from clearing a
@@ -119,7 +125,9 @@ Item {
     registration: registration,
     aor: aor,
     callState: callState,
-    lastError: lastError
+    lastError: lastError,
+    muted: muted,
+    onHold: onHold
   })
 
   signal incomingCall(string peerUri)
@@ -288,6 +296,34 @@ Item {
     return ""
   }
 
+  // Optimistic, like dial(): the row flips at once, and a refusal from the
+  // daemon (see "commandFailed") flips it back.
+  function toggleMute() {
+    if (!onCall) return "no call in progress"
+    var next = !muted
+    pendingToggle = { kind: "mute", previous: muted }
+    toggleTimer.restart()
+    muted = next
+    if (!command("mute", next ? "yes" : "no")) { muted = !next; return "too many commands queued" }
+    return ""
+  }
+
+  function toggleHold() {
+    if (callState !== "active") return "no answered call to hold"
+    var next = !onHold
+    pendingToggle = { kind: "hold", previous: onHold }
+    toggleTimer.restart()
+    onHold = next
+    if (!command(next ? "hold" : "resume")) { onHold = !next; return "too many commands queued" }
+    return ""
+  }
+
+  function resetCallControls() {
+    muted = false
+    onHold = false
+    pendingToggle = null
+  }
+
   function startDaemon() { run(["start"]) }
 
   function loadAccount() {
@@ -348,6 +384,11 @@ Item {
     // on screen until the next periodic resync.
     if (update.kind === "commandFailed") {
       lastError = elide(update.error)
+      if (pendingToggle) {
+        if (pendingToggle.kind === "mute") muted = pendingToggle.previous
+        else onHold = pendingToggle.previous
+        pendingToggle = null
+      }
       if (callState === "outgoing" && lastCallEventAt < dialSentAt) {
         callState = "idle"
         peer = ""
@@ -396,6 +437,9 @@ Item {
     if (update.kind === "call") {
       lastCallEventAt = Date.now()
       var wasRinging = callState === "incoming"
+      // A different call, or none: its mute and hold state are not ours.
+      if (update.callState === "idle" || update.callState === "incoming"
+          || (update.callId && callId && update.callId !== callId)) resetCallControls()
       callState = update.callState
       if (update.callState === "idle") {
         Qt.callLater(syncOptions)   // anything held back for the call
@@ -543,6 +587,13 @@ Item {
         root.history = []
       }
     }
+  }
+
+  // A refusal arrives within a round trip; after this, the change stuck.
+  Timer {
+    id: toggleTimer
+    interval: 5000
+    onTriggered: root.pendingToggle = null
   }
 
   Timer {

@@ -1605,6 +1605,12 @@ _COMMAND_GRAMMAR: dict[str, "re.Pattern[str] | None"] = {
     "hangup": None,
     "reginfo": None,
     "listcalls": None,
+    # In-call controls from baresip's menu module, all on the current call.
+    # mute takes an explicit state rather than toggling, so a command that
+    # arrives twice cannot flip it back.
+    "mute": re.compile(r"^(yes|no)$"),
+    "hold": None,
+    "resume": None,
 }
 
 

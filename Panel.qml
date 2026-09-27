@@ -77,7 +77,15 @@ Panel {
       { id: "answer", label: "Answer", glyph: "\uf095" },
       { id: "reject", label: "Reject", glyph: "\uf00d" }
     ]
-    if (sip.onCall) return [{ id: "hangup", label: "Hang up", glyph: "\uf00d" }]
+    if (sip.onCall) {
+      var inCall = [{ id: "mute", label: sip.muted ? "Unmute" : "Mute",
+                      glyph: sip.muted ? "\uf131" : "\uf130", hint: "m" }]
+      if (sip.callState === "active")
+        inCall.push({ id: "hold", label: sip.onHold ? "Resume" : "Hold",
+                      glyph: sip.onHold ? "\uf04b" : "\uf04c", hint: "x" })
+      inCall.push({ id: "hangup", label: "Hang up", glyph: "\uf00d", hint: "b" })
+      return inCall
+    }
     var rows = [{ id: "setup", label: "Account settings", glyph: "\uf013", section: "primary" }]
     // Recent calls are actions too: they share the cursor model, so Enter on a
     // row redials it and the keyboard behaves the same everywhere.
@@ -101,6 +109,8 @@ Panel {
     case "answer": sip.answer(); break
     case "reject": sip.hangup(); break
     case "hangup": sip.hangup(); break
+    case "mute":   sip.toggleMute(); break
+    case "hold":   sip.toggleHold(); break
     case "setup":  setupOpen = true; break
     default:
       if (id.indexOf("redial:") === 0 && id.length > 7) sip.dial(id.substring(7))
@@ -209,6 +219,8 @@ Panel {
     function dial(uri: string): string { return root.ipcResult(sip.dial(uri)) }
     function answer(): string { return root.ipcResult(sip.answer()) }
     function hangup(): string { return root.ipcResult(sip.hangup()) }
+    function mute(): string { return root.ipcResult(sip.toggleMute()) }
+    function hold(): string { return root.ipcResult(sip.toggleHold()) }
     function status(): string {
       return sip.callState + " " + (sip.peer || "-") + " " + sip.registration
     }
@@ -289,6 +301,8 @@ Panel {
         if (key === "a" && sip.callState === "incoming") sip.answer()
         else if ((key === "d" || key === "r") && sip.callState === "incoming") sip.hangup()
         else if ((key === "b" || key === "h") && sip.onCall) sip.hangup()
+        else if (key === "m" && sip.onCall) sip.toggleMute()
+        else if (key === "x" && sip.callState === "active") sip.toggleHold()
         else if (key === "s") root.setupOpen = !root.setupOpen
       }
 

@@ -113,6 +113,12 @@ t("optionChanges applies aec when idle", M.optionChanges({ aec: true }, { aec: f
 t("optionChanges ignores a key the daemon has not reported", M.optionChanges({ aec: true }, {}, {}, true), []);
 
 t("classify show panel", M.classifyEvent({ type: "SHOW_PANEL" }), { kind: "showPanel" });
+t("title in call", M.callTitle({ callState: "active" }), "In call");
+t("title on hold", M.callTitle({ callState: "active", onHold: true }), "On hold");
+t("title muted", M.callTitle({ callState: "active", muted: true }), "In call \u00b7 Muted");
+t("title muted while calling", M.callTitle({ callState: "outgoing", muted: true }), "Calling\u2026 \u00b7 Muted");
+t("title incoming ignores stale mute", M.callTitle({ callState: "incoming", muted: true }), "Incoming call");
+t("title idle", M.callTitle({ callState: "idle" }), "");
 t("duration 95s", M.durationText(1000, 1000 + 95000), "01:35");
 t("duration hours", M.durationText(1, 1 + 3725000), "1:02:05");
 t("duration unset", M.durationText(0, 5000), "");

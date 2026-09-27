@@ -530,6 +530,17 @@ check("dispatch allows an explicit port",
       == [("dial sip:b@x.com:5080", "t")])
 check("dispatch refuses a no-parameter command that was given one anyway",
       dispatched(b'{"command":"hangup","params":"sip:a@b","token":"t"}')[0] == [])
+check("dispatch allows mute with an explicit state",
+      dispatched(b'{"command":"mute","params":"yes"}')[0] == [("mute yes", "")]
+      and dispatched(b'{"command":"mute","params":"no"}')[0] == [("mute no", "")])
+check("dispatch refuses mute with anything else",
+      all(dispatched(('{"command":"mute","params":"%s"}' % v).encode())[0] == []
+          for v in ("toggle", "yes;quit", "yes no", "")))
+check("dispatch allows hold and resume with no parameter",
+      dispatched(b'{"command":"hold"}')[0] == [("hold", "")]
+      and dispatched(b'{"command":"resume"}')[0] == [("resume", "")])
+check("dispatch refuses hold given a call id",
+      dispatched(b'{"command":"hold","params":"abc"}')[0] == [])
 check("dispatch ignores malformed JSON", dispatched(b"not json") == ([], []))
 check("dispatch ignores a non-object", dispatched(b'["dial"]') == ([], []))
 check("dispatch clips an overlong token on the accepted path",
