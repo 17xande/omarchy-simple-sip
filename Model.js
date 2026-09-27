@@ -146,6 +146,20 @@ function validTarget(uri) {
   return TARGET_RE.test(String(uri || ""))
 }
 
+// The address of record the setup form saves. People type the server they
+// were given -- "pbx.example.com" -- with the extension in the auth field;
+// baresip needs sip:user@host, and an account without the user part is
+// refused outright and registers nothing. So a bare host borrows the auth
+// user as its user part, and a missing scheme is supplied.
+function accountUri(input, authUser) {
+  var value = String(input || "").trim().replace(/\s+/g, "")
+  if (value === "") return ""
+  value = value.replace(/^sips?:/i, "")
+  var user = String(authUser || "").trim()
+  if (value.indexOf("@") < 0 && user !== "") value = user + "@" + value
+  return "sip:" + value
+}
+
 function domainOf(aor) {
   var value = String(aor || "").replace(/^sips?:/, "")
   var at = value.indexOf("@")

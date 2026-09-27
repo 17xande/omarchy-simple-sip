@@ -502,24 +502,56 @@ def exists_at(name: str, dir_fd: int) -> bool:
         return False
 
 
+def parse_account_line(line: str) -> dict:
+    """Split one accounts line into its display name, URI and parameters.
+
+    Only ever needs to read what `account set` writes: an optional quoted
+    display name, the URI in angle brackets, then `;key=value` fields. The
+    writer refuses `;`, `"`, CR and LF in every value, so a `;` after the
+    closing `>` always starts a field. Values are clipped, and at most 32
+    fields are kept, so a hand-edited or substituted file cannot hand back
+    anything large.
+    """
+    line = line.strip()
+    display = ""
+    if line.startswith('"'):
+        end = line.find('"', 1)
+        if end > 0:
+            display, line = line[1:end], line[end + 1 :].strip()
+    uri, rest = line, ""
+    if line.startswith("<") and ">" in line:
+        uri, rest = line[1 : line.index(">")], line[line.index(">") + 1 :]
+    elif ";" in line:
+        uri, rest = line.split(";", 1)
+        rest = ";" + rest
+    params: dict[str, str] = {}
+    for field in rest.split(";")[1:33]:
+        key, _, value = field.partition("=")
+        key = key.strip()
+        if key:
+            params[clip(key, 64)] = clip(value.strip().strip('"'), MAX_ACCOUNT_FIELD)
+    return {"display": clip(display, MAX_ACCOUNT_FIELD), "uri": clip(uri.strip()), "params": params}
+
+
+def account_entry() -> dict | None:
+    """The first meaningful line of the accounts file, parsed, or None."""
+    for line in read_bounded(ACCOUNTS, conf_fd(), MAX_ACCOUNTS_FILE).split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        return parse_account_line(line)
+    return None
+
+
 def account_transport() -> str:
     """The transport this account registers with, for sip_transports.
 
     Defaults to udp, which is both baresip's default and what an account with
     no explicit transport= will use.
     """
-    for line in read_bounded(ACCOUNTS, conf_fd(), MAX_ACCOUNTS_FILE).split("\n"):
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        for field in line.split(";")[1:]:
-            key, _, value = field.partition("=")
-            if key.strip() == "transport":
-                value = value.strip().strip('"').lower()
-                if value in ("udp", "tcp", "tls"):
-                    return value
-        break
-    return "udp"
+    entry = account_entry()
+    value = (entry or {}).get("params", {}).get("transport", "").lower()
+    return value if value in ("udp", "tcp", "tls") else "udp"
 
 
 def ensure_config() -> None:
@@ -643,15 +675,8 @@ def clip(value, limit: int = MAX_FIELD) -> str:
 
 def account_aor() -> str:
     """AOR from the first meaningful line of the accounts file."""
-    for line in read_bounded(ACCOUNTS, conf_fd(), MAX_ACCOUNTS_FILE).split("\n"):
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
-        line = line.split(";", 1)[0]
-        if "<" in line:
-            line = line[line.index("<") + 1 :]
-        return clip(line.rstrip(">").strip())
-    return ""
+    entry = account_entry()
+    return entry["uri"] if entry else ""
 
 
 # ------------------------------------------------------------------- the daemon
@@ -1595,16 +1620,40 @@ def account_field(name: str, value: str, limit: int = MAX_ACCOUNT_FIELD) -> str:
     return value
 
 
+# A registrable address of record: sip:user@host, optionally :port. baresip
+# refuses an account whose URI has no user part ("module account.so: Invalid
+# argument") and then registers nothing at all -- the daemon runs, the panel
+# says "Starting…", and no call ever arrives -- so it is refused here instead,
+# where the person saving it can be told why.
+ACCOUNT_URI = re.compile(r"^sip:[^@\s;\"<>]+@[^@\s;\"<>]+$")
+
+
+def account_details() -> dict:
+    """What `account show` reports: everything the form edits except the
+    password, whose presence alone is reported."""
+    entry = account_entry()
+    if entry is None:
+        return {"configured": False, "aor": ""}
+    params = entry["params"]
+    regint = params.get("regint", "")
+    return {
+        "configured": bool(entry["uri"]),
+        "aor": entry["uri"],
+        "displayName": entry["display"],
+        "authUser": params.get("auth_user", ""),
+        "transport": account_transport(),
+        "outbound": params.get("outbound", ""),
+        "regint": int(regint) if regint.isdigit() else None,
+        "hasPassword": bool(params.get("auth_pass", "")),
+    }
+
+
 def cmd_account(args) -> int:
     accounts = os.path.join(CONF_DIR, ACCOUNTS)   # display only; opens go via conf_fd()
     if args.action == "show":
-        aor = account_aor()
-        print(
-            json.dumps(
-                {"configured": bool(aor), "aor": aor, "accountsFile": accounts},
-                separators=(",", ":"),
-            )
-        )
+        details = account_details()
+        details["accountsFile"] = accounts
+        print(json.dumps(details, separators=(",", ":")))
         return 0
 
     if args.action == "clear":
@@ -1613,14 +1662,35 @@ def cmd_account(args) -> int:
         print("omarchy-sip: account cleared")
         return 0
 
-    # set
-    uri = account_field("account URI", args.uri or "")
-    if not uri.startswith("sip:"):
-        die("account set needs a sip: URI, e.g. sip:you@pbx.example.com")
-    auth_user = account_field("auth user", args.auth_user) if args.auth_user else ""
-    display_name = account_field("display name", args.display_name) if args.display_name else ""
-    outbound = account_field("outbound proxy", args.outbound) if args.outbound else ""
+    # set. With --merge, any field not supplied keeps its current value --
+    # above all the password, which the panel's form never shows and so can
+    # only ever leave blank. Without it, a form opened to change the
+    # transport would have saved an account with no password at all.
+    current = account_entry() if args.merge else None
+    params = current["params"] if current else {}
+
+    def pick(given, key):
+        return given if given is not None else params.get(key, "")
+
+    uri = account_field("account URI", args.uri or (current["uri"] if current else ""))
+    if not ACCOUNT_URI.match(uri):
+        die("account set needs a sip:user@host URI, e.g. sip:1001@pbx.example.com")
+    auth_user = account_field("auth user", pick(args.auth_user, "auth_user"))
+    display_name = account_field(
+        "display name",
+        args.display_name if args.display_name is not None else (current["display"] if current else ""),
+    )
+    outbound = account_field("outbound proxy", pick(args.outbound, "outbound"))
     password = account_field("password", read_password_from_stdin())
+    if not password and current:
+        password = account_field("password", params.get("auth_pass", ""))
+    transport = args.transport or (account_transport() if current else "udp")
+    regint = args.regint
+    if regint is None:
+        kept = params.get("regint", "")
+        regint = int(kept) if kept.isdigit() else 600
+    if not 0 <= regint <= 86400:
+        die("regint must be between 0 and 86400 seconds")
 
     entry = f'"{display_name}" ' if display_name else ""
     entry += f"<{uri}>"
@@ -1628,17 +1698,17 @@ def cmd_account(args) -> int:
         entry += f";auth_user={auth_user}"
     if password:
         entry += f";auth_pass={password}"
-    entry += f";transport={args.transport}"
+    entry += f";transport={transport}"
     if outbound:
         entry += f';outbound="{outbound}"'
-    entry += f";answermode=manual;regint={args.regint}"
+    entry += f";answermode=manual;regint={regint}"
     entry += ";audio_codecs=opus/48000/2,PCMU/8000/1,PCMA/8000/1"
 
     # Accounts first: ensure_config() derives sip_transports from it, so
     # generating the config before the write would bake in the old transport.
     write_private(ACCOUNTS, entry + "\n", conf_fd())
     ensure_config()
-    print(f"omarchy-sip: account set to {args.uri}")
+    print(f"omarchy-sip: account set to {uri}")
     restart_if_live()
     return 0
 
@@ -1689,9 +1759,12 @@ def main(argv: list[str]) -> int:
     p.add_argument("uri", nargs="?")
     p.add_argument("--auth-user")
     p.add_argument("--display-name")
-    p.add_argument("--transport", choices=["udp", "tcp", "tls"], default="udp")
+    p.add_argument("--transport", choices=["udp", "tcp", "tls"],
+                   help="default: udp, or the current transport with --merge")
     p.add_argument("--outbound")
-    p.add_argument("--regint", type=int, default=600)
+    p.add_argument("--regint", type=int, help="default: 600, or the current value with --merge")
+    p.add_argument("--merge", action="store_true",
+                   help="keep the current value of every field not given, including the password")
     p.set_defaults(func=cmd_account)
 
     args = parser.parse_args(argv)

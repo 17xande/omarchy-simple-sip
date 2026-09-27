@@ -29,6 +29,9 @@ Panel {
   property int cursorIndex: 0
   property bool setupOpen: false
   property string dialText: ""
+  // Set once the person edits the setup form, so account details that arrive
+  // late (the `account show` round trip) never overwrite what they typed.
+  property bool setupTouched: false
 
   // A text field owns the keyboard whenever one is on screen, so letter
   // shortcuts (a / d / b) only apply in the states that have no input.
@@ -104,6 +107,29 @@ Panel {
   function close() {
     root.controller.hide()
     setupOpen = false
+  }
+
+  // Opening the form shows the account as it is, so changing one field does
+  // not silently reset the others -- the transport used to reappear as udp.
+  function fillSetupForm() {
+    if (setupTouched) return
+    var d = sip.accountDetails || {}
+    uriField.text = String(d.aor || "")
+    authField.text = String(d.authUser || "")
+    displayField.text = String(d.displayName || "")
+    transportField.value = ["udp", "tcp", "tls"].indexOf(d.transport) >= 0 ? d.transport : "udp"
+    passwordField.text = ""
+  }
+
+  onSetupOpenChanged: if (setupOpen) {
+    setupTouched = false
+    fillSetupForm()
+    sip.loadAccount()
+  }
+
+  Connections {
+    target: sip
+    function onAccountDetailsChanged() { if (setupForm.visible) root.fillSetupForm() }
   }
 
   function placeCall() {
@@ -438,10 +464,11 @@ Panel {
             TextField {
               id: uriField
               width: parent.width
-              placeholderText: "sip:you@pbx.example.com"
+              placeholderText: "sip:1001@pbx.example.com"
               foreground: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.body
+              onTextEdited: root.setupTouched = true
               Keys.onEscapePressed: root.setupOpen = false
             }
 
@@ -452,13 +479,26 @@ Panel {
               foreground: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.body
+              onTextEdited: root.setupTouched = true
+              Keys.onEscapePressed: root.setupOpen = false
+            }
+
+            TextField {
+              id: displayField
+              width: parent.width
+              placeholderText: "Display name (optional)"
+              foreground: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              onTextEdited: root.setupTouched = true
               Keys.onEscapePressed: root.setupOpen = false
             }
 
             TextField {
               id: passwordField
               width: parent.width
-              placeholderText: "Password"
+              placeholderText: sip.accountDetails && sip.accountDetails.hasPassword
+                               ? "Password (blank keeps the current one)" : "Password"
               password: true
               foreground: root.foreground
               font.family: root.fontFamily
@@ -475,7 +515,7 @@ Panel {
               options: ["udp", "tcp", "tls"]
               foreground: root.foreground
               fontFamily: root.fontFamily
-              onChanged: function(v) { transportField.value = v }
+              onChanged: function(v) { transportField.value = v; root.setupTouched = true }
             }
 
             RowLayout {
@@ -501,12 +541,12 @@ Panel {
   }
 
   function saveAccount() {
-    var uri = uriField.text.trim()
+    var uri = Model.accountUri(uriField.text, authField.text)
     if (uri === "") return
-    if (uri.indexOf("sip:") !== 0) uri = "sip:" + uri
     // A save already in flight refuses this one; keep the form (and the typed
     // password) on screen rather than silently dropping it.
-    if (!sip.setAccount(uri, authField.text.trim(), "", transportField.value, passwordField.text))
+    if (!sip.setAccount(uri, authField.text.trim(), displayField.text.trim(),
+                        transportField.value, passwordField.text))
       return
     // Never keep the password in a live QML property.
     passwordField.text = ""

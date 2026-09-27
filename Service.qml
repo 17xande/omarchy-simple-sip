@@ -97,6 +97,9 @@ Item {
   property double dialSentAt: 0
   // Recent calls, newest first, as recorded by the daemon.
   property var history: []
+  // The stored account as `account show` reports it -- everything the setup
+  // form edits except the password, of which only hasPassword is known.
+  property var accountDetails: ({})
 
   readonly property bool ready: daemonUp && configured && registration === "registered"
   readonly property bool busy: actionProcess.running
@@ -244,15 +247,28 @@ Item {
 
   function startDaemon() { run(["start"]) }
 
+  function loadAccount() {
+    if (accountShowProcess.running) return
+    accountShowProcess.command = [cli, "account", "show"]
+    accountShowProcess.running = true
+    accountShowWatchdog.restart()
+  }
+
   // Password goes over stdin so it never appears in a process listing.
   // Returns false if a save is already in flight, so the caller knows not to
   // clear the form -- dropping the typed password on the floor is worse than
   // making the user press Save again.
+  //
+  // Always --merge: the form never shows the stored password, so a blank one
+  // means "unchanged", and the CLI keeps it (and outbound/regint, which the
+  // form does not edit) rather than saving an account with no password.
+  // Auth user and display name are always passed, so clearing either field
+  // does clear it.
   function setAccount(uri, authUser, displayName, transport, password) {
     if (accountProcess.running) return false
-    var args = [cli, "account", "set", uri]
-    if (authUser) args = args.concat(["--auth-user", authUser])
-    if (displayName) args = args.concat(["--display-name", displayName])
+    var args = [cli, "account", "set", uri, "--merge",
+                "--auth-user", String(authUser || ""),
+                "--display-name", String(displayName || "")]
     if (transport) args = args.concat(["--transport", transport])
     lastError = ""
     accountProcess.errText = ""
@@ -553,9 +569,35 @@ Item {
       if (exitCode !== 0) root.lastError = elide(accountProcess.errText || "Could not save account")
       else root.lastError = ""
       accountProcess.stdinEnabled = true
+      root.loadAccount()
       // The daemon restarts on an account change; give it a moment to register.
       accountSettleTimer.restart()
     }
+  }
+
+  Process {
+    id: accountShowProcess
+    running: false
+    command: []
+    clearEnvironment: true
+    environment: root.cleanEnv()
+    stdout: StdioCollector { id: accountShowOut; waitForEnd: true }
+    onExited: function(exitCode) {
+      accountShowWatchdog.stop()
+      if (exitCode !== 0) return
+      var raw = String(accountShowOut.text || "")
+      if (raw.length > root.maxJsonChars) return
+      try {
+        var parsed = JSON.parse(raw)
+        if (parsed && typeof parsed === "object") root.accountDetails = parsed
+      } catch (e) {}
+    }
+  }
+
+  Timer {
+    id: accountShowWatchdog
+    interval: 10000
+    onTriggered: if (accountShowProcess.running) accountShowProcess.running = false
   }
 
   function elide(text) {
@@ -624,5 +666,6 @@ Item {
   Component.onCompleted: {
     startEvents()
     refresh()
+    loadAccount()
   }
 }

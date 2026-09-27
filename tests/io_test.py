@@ -397,6 +397,76 @@ check("an empty accounts file is udp", transport_for("") == "udp")
 mod.CONF_DIR = orig_conf
 
 
+# ------------------------------------------------------ account set --merge
+
+# The panel's form never shows the stored password, so it can only ever submit
+# it blank. Saving that form to change the transport used to rewrite the
+# account with no auth_pass -- and reset the transport to udp while at it. The
+# CLI runs for real here, against a scratch config directory.
+
+CLI = os.path.join(os.path.dirname(__file__), "..", "bin", "omarchy-sip")
+os.mkdir(path("merge"), 0o700)
+os.mkdir(path("merge-run"), 0o700)
+
+
+def sip(*args, stdin=b""):
+    env = {"HOME": tmp, "PATH": "/usr/bin:/bin", "OMARCHY_SIP_CONF": path("merge"),
+           "XDG_RUNTIME_DIR": path("merge-run")}
+    return subprocess.run([sys.executable, "-I", CLI, *args], input=stdin, env=env,
+                          capture_output=True, timeout=20)
+
+
+def stored_account():
+    with open(path("merge/accounts")) as fh:
+        return mod.parse_account_line(fh.read().strip())
+
+
+r = sip("account", "set", "sip:1001@pbx.example.com", "--auth-user", "u1001",
+        "--transport", "tls", "--outbound", "sip:proxy.example.com", "--regint", "300",
+        stdin=b"s3cret\n")
+check("account set writes a fresh account", r.returncode == 0)
+r = sip("account", "set", "--merge", "--display-name", "Front desk", stdin=b"")
+acct_after = stored_account()
+check("--merge with a blank password keeps the stored one",
+      r.returncode == 0 and acct_after["params"].get("auth_pass") == "s3cret")
+check("--merge keeps the transport", acct_after["params"].get("transport") == "tls")
+check("--merge keeps the auth user", acct_after["params"].get("auth_user") == "u1001")
+check("--merge keeps the outbound proxy", acct_after["params"].get("outbound") == "sip:proxy.example.com")
+check("--merge keeps regint", acct_after["params"].get("regint") == "300")
+check("--merge keeps the URI", acct_after["uri"] == "sip:1001@pbx.example.com")
+check("--merge applies what was given", acct_after["display"] == "Front desk")
+
+r = sip("account", "set", "--merge", "--transport", "tcp", stdin=b"n3w\n")
+acct_after = stored_account()
+check("--merge replaces the password when one is typed", acct_after["params"].get("auth_pass") == "n3w")
+check("--merge changes the transport when asked", acct_after["params"].get("transport") == "tcp")
+
+r = sip("account", "show")
+shown = json.loads(r.stdout)
+check("account show reports the fields the form edits",
+      (shown["authUser"], shown["transport"], shown["displayName"], shown["regint"])
+      == ("u1001", "tcp", "Front desk", 300))
+check("account show reports a password exists...", shown["hasPassword"] is True)
+check("...and never the password itself", b"n3w" not in r.stdout)
+
+r = sip("account", "set", "sip:1001@pbx.example.com", stdin=b"")
+check("without --merge a blank password is still a blank password",
+      "auth_pass" not in stored_account()["params"])
+
+r = sip("account", "set", "sip:pbx.example.com", "--auth-user", "1001", stdin=b"x\n")
+check("an address of record with no user part is refused",
+      r.returncode != 0 and b"sip:user@host" in r.stderr)
+check("...and the stored account is untouched", stored_account()["uri"] == "sip:1001@pbx.example.com")
+
+check("parse_account_line reads a display name, URI and fields",
+      mod.parse_account_line('"Bob" <sip:b@x>;auth_user=b;outbound="sip:p"')
+      == {"display": "Bob", "uri": "sip:b@x", "params": {"auth_user": "b", "outbound": "sip:p"}})
+check("parse_account_line caps the fields it keeps",
+      len(mod.parse_account_line("<sip:a@b>" + ";k%d=v" * 100 % tuple(range(100)))["params"]) == 32)
+check("parse_account_line clips an oversized value",
+      len(mod.parse_account_line("<sip:a@b>;auth_user=" + "x" * 5000)["params"]["auth_user"]) <= 256)
+
+
 # --------------------------------------------------------- command dispatch
 
 # The client wire protocol is unchanged from the ctrl_tcp days, but it is now

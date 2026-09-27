@@ -3,7 +3,7 @@
 const fs = require("fs");
 const src = fs.readFileSync(require("path").join(__dirname, "..", "Model.js"), "utf8");
 const M = {};
-new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,callTitle,domainOf,historyGlyph,redialTarget,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
+new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,accountUri,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,callTitle,domainOf,historyGlyph,redialTarget,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
 
 let fails = 0;
 const ESC = String.fromCharCode(27);
@@ -45,6 +45,12 @@ t("classify ignores a successful reply", M.classifyEvent({ response: true, ok: t
 t("classify ignores another client's refusal",
   M.classifyEvent({ response: true, ok: false, data: "x", token: "req-123" }), null);
 
+t("accountUri full", M.accountUri("sip:1001@pbx.example.com", "1001"), "sip:1001@pbx.example.com");
+t("accountUri adds scheme", M.accountUri("1001@pbx", ""), "sip:1001@pbx");
+t("accountUri bare host borrows the auth user", M.accountUri("pbx.example.com", "3077"), "sip:3077@pbx.example.com");
+t("accountUri sip:host borrows the auth user", M.accountUri("sip:pbx.example.com", "3077"), "sip:3077@pbx.example.com");
+t("accountUri bare host with no auth user is left for the CLI to refuse", M.accountUri("pbx", ""), "sip:pbx");
+t("accountUri empty", M.accountUri("  ", "x"), "");
 t("peerLabel params", M.peerLabel("sip:bob@192.168.22.10:5080;transport=udp"), "bob@192.168.22.10:5080");
 t("peerLabel angle", M.peerLabel('"Bob" <sip:bob@x.com>'), "bob@x.com");
 t("peerShort", M.peerShort("sip:1001@pbx"), "1001");
