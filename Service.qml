@@ -100,6 +100,12 @@ Item {
   // The stored account as `account show` reports it -- everything the setup
   // form edits except the password, of which only hasPassword is known.
   property var accountDetails: ({})
+  // The daemon's own options (options.json), as last reported by it.
+  property var daemonOptions: ({})
+  // Set by the panel on exactly one copy of the widget, so a multi-monitor
+  // bar does not write the same option once per monitor.
+  property bool optionSync: false
+  property var pendingOptions: ({})
 
   readonly property bool ready: daemonUp && configured && registration === "registered"
   readonly property bool busy: actionProcess.running
@@ -187,6 +193,31 @@ Item {
     actionProcess.running = true
     actionWatchdog.restart()
   }
+
+  // What the panel's settings say the daemon's options should be. dnd is not
+  // here: it is toggled at run time and lives only in the daemon.
+  function wantedOptions() {
+    return {
+      notifications: boolSetting("ringNotifications", true)
+    }
+  }
+
+  function syncOptions() {
+    if (!optionSync || !daemonUp) return
+    var changes = Model.optionChanges(wantedOptions(), daemonOptions, pendingOptions,
+                                      callState === "idle")
+    for (var i = 0; i < changes.length; i++) setOption(changes[i][0], changes[i][1])
+  }
+
+  function setOption(key, value) {
+    var pending = Object.assign({}, pendingOptions)
+    pending[key] = value
+    pendingOptions = pending
+    run(["option", "set", key, value ? "on" : "off"])
+  }
+
+  onSettingsChanged: syncOptions()
+  onOptionSyncChanged: syncOptions()
 
   function drainQueue() {
     if (actionProcess.running || commandQueue.length === 0) return
@@ -340,6 +371,13 @@ Item {
       return
     }
 
+    if (update.kind === "options") {
+      daemonOptions = update.options
+      pendingOptions = ({})
+      syncOptions()
+      return
+    }
+
     if (update.kind === "registration") {
       registration = update.registration
       if (update.aor) aor = update.aor
@@ -352,6 +390,7 @@ Item {
       var wasRinging = callState === "incoming"
       callState = update.callState
       if (update.callState === "idle") {
+        Qt.callLater(syncOptions)   // anything held back for the call
         peer = ""
         callId = ""
         callStartedAt = 0
@@ -405,6 +444,10 @@ Item {
     daemonUp = status.daemonUp === true
     configured = status.configured === true
     if (status.aor) aor = String(status.aor)
+    if (status.options && typeof status.options === "object") {
+      daemonOptions = Model.pickOptions(status.options)
+      syncOptions()
+    }
 
     // reginfo is authoritative on startup; events take over from there.
     if (status.reginfo && status.reginfo.data !== undefined) {

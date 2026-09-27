@@ -40,6 +40,10 @@ function classifyEvent(ev) {
   case "CTRL_FAILED":
     return { kind: "ctrl", connected: false, error: (ev && ev.reason) || "" }
 
+  // -- the daemon's own options, replayed to every client on connect
+  case "OPTIONS":
+    return { kind: "options", options: pickOptions(ev) }
+
   // -- registration
   case "REGISTERING":
     return { kind: "registration", registration: "pending" }
@@ -64,6 +68,35 @@ function classifyEvent(ev) {
              closedReason: String((ev && ev.param) || "") }
   }
   return null
+}
+
+// Only the keys the daemon defines, and only booleans -- mirrors
+// read_options() in the CLI.
+var OPTION_KEYS = ["notifications", "regAlerts", "dnd", "aec"]
+
+function pickOptions(obj) {
+  var out = {}
+  for (var i = 0; i < OPTION_KEYS.length; i++) {
+    var key = OPTION_KEYS[i]
+    if (obj && typeof obj[key] === "boolean") out[key] = obj[key]
+  }
+  return out
+}
+
+// Which daemon options differ from what the panel's settings want, as
+// [key, value] pairs. `pending` holds writes already sent and not yet
+// confirmed by an OPTIONS event, so a slow round trip is not written twice.
+// `aec` restarts the daemon, so it is held back while a call is up.
+function optionChanges(wanted, current, pending, callIdle) {
+  var out = []
+  for (var key in wanted) {
+    if (typeof current[key] !== "boolean") continue
+    if (current[key] === wanted[key]) continue
+    if (pending && pending[key] === wanted[key]) continue
+    if (key === "aec" && !callIdle) continue
+    out.push([key, wanted[key]])
+  }
+  return out
 }
 
 // ------------------------------------------------------- prose from responses

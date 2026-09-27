@@ -189,6 +189,7 @@ Panel {
   Service {
     id: sip
     settings: root.settings
+    optionSync: root.isLeader
 
     // Ringing is the one thing worth interrupting for: surface the panel so
     // Answer is one click away rather than buried behind the bar icon.

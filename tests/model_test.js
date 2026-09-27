@@ -3,7 +3,7 @@
 const fs = require("fs");
 const src = fs.readFileSync(require("path").join(__dirname, "..", "Model.js"), "utf8");
 const M = {};
-new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,accountUri,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,callTitle,domainOf,historyGlyph,redialTarget,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
+new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,optionChanges,pickOptions,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,accountUri,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,callTitle,domainOf,historyGlyph,redialTarget,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
 
 let fails = 0;
 const ESC = String.fromCharCode(27);
@@ -99,6 +99,18 @@ t("classify closed", M.classifyEvent({ type: "CALL_CLOSED", param: "Rejected by 
 t("classify reg ok", M.classifyEvent({ type: "REGISTER_OK", accountaor: "sip:a@x" }),
   { kind: "registration", registration: "registered", aor: "sip:a@x" });
 t("classify ctrl up", M.classifyEvent({ type: "CTRL_CONNECTED" }), { kind: "ctrl", connected: true });
+
+t("classify options keeps only known booleans",
+  M.classifyEvent({ type: "OPTIONS", dnd: true, notifications: false, aec: "yes", other: true }),
+  { kind: "options", options: { notifications: false, dnd: true } });
+t("optionChanges finds a difference", M.optionChanges({ notifications: false }, { notifications: true }, {}, true),
+  [["notifications", false]]);
+t("optionChanges nothing when equal", M.optionChanges({ notifications: true }, { notifications: true }, {}, true), []);
+t("optionChanges skips a write already pending",
+  M.optionChanges({ notifications: false }, { notifications: true }, { notifications: false }, true), []);
+t("optionChanges holds aec back during a call", M.optionChanges({ aec: true }, { aec: false }, {}, false), []);
+t("optionChanges applies aec when idle", M.optionChanges({ aec: true }, { aec: false }, {}, true), [["aec", true]]);
+t("optionChanges ignores a key the daemon has not reported", M.optionChanges({ aec: true }, {}, {}, true), []);
 
 t("duration 95s", M.durationText(1000, 1000 + 95000), "01:35");
 t("duration hours", M.durationText(1, 1 + 3725000), "1:02:05");

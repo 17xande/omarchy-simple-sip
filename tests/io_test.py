@@ -538,6 +538,42 @@ check("dispatch clips an overlong token on the rejected path",
       len(dispatched(b'{"command":"quit","token":"' + b"z" * 500 + b'"}')[1][0]["token"]) == 128)
 
 
+# ------------------------------------------------------------------ options
+
+# The daemon acts on these with no shell running, so the file is the only
+# channel -- and like every other file it is bounded and allowlisted.
+opt_fd = mod.dir_fd_for(path("opts"))
+check("options default when the file is missing", mod.read_options(opt_fd) == mod.OPTION_DEFAULTS)
+mod.write_options({"dnd": True, "aec": True, "evil": True}, opt_fd)
+got_opts = mod.read_options(opt_fd)
+check("options round-trip", got_opts["dnd"] is True and got_opts["aec"] is True)
+check("unknown keys are not written", "evil" not in open(path("opts/options.json")).read())
+mod.write_private(mod.OPTIONS, '{"dnd":"yes","notifications":false,"other":1}', opt_fd)
+got_opts = mod.read_options(opt_fd)
+check("a non-boolean value is ignored, not coerced", got_opts["dnd"] is False)
+check("a valid value beside it still applies", got_opts["notifications"] is False)
+check("unknown keys are dropped on read", "other" not in got_opts)
+mod.write_private(mod.OPTIONS, '{"dnd":true,' + ' ' * 8192 + '}', opt_fd)
+check("an oversized options file reads as the defaults", mod.read_options(opt_fd) == mod.OPTION_DEFAULTS)
+mod.write_private(mod.OPTIONS, "not json", opt_fd)
+check("a corrupt options file reads as the defaults", mod.read_options(opt_fd) == mod.OPTION_DEFAULTS)
+
+# Daemon-local commands are answered by the daemon and never reach baresip.
+local_calls = []
+bus, hub_ = FakeBus(), FakeHub()
+mod.dispatch(bus, hub_, b'{"command":"reload-options","token":"t"}',
+             lambda n, p, t: local_calls.append((n, p, t)))
+check("a local command goes to the local handler", local_calls == [("reload-options", "", "t")])
+check("...and never to baresip", bus.calls == [])
+check("a local command with no local handler is refused",
+      dispatched(b'{"command":"reload-options","token":"t"}') == (
+          [], [{"response": True, "ok": False, "data": "command not permitted", "token": "t"}]))
+local_calls.clear()
+mod.dispatch(FakeBus(), FakeHub(), b'{"command":"reload-options","params":"x"}',
+             lambda n, p, t: local_calls.append(n))
+check("a local command given a parameter it does not take is refused", local_calls == [])
+
+
 # ----------------------------------------------------------------- ringtone
 
 ring = mod.ringtone_wav()
@@ -647,6 +683,26 @@ check("a client connecting after the daemon is greeted on connect",
       late.recv(4096) == b'{"type":"CTRL_CONNECTED"}\n')
 check("... and is a normal client afterwards", late_conn in hub.clients)
 late.close()
+
+# One greeting per kind: the options and the voicemail summary are state a
+# late client needs as much as CTRL_CONNECTED, and a newer record of a kind
+# replaces the older one rather than piling up.
+hub.greet('{"type":"OPTIONS","dnd":false}')
+hub.greet('{"type":"OPTIONS","dnd":true}')
+late2 = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+late2.connect(f"/proc/self/fd/{srv_dir}/control")
+hub.accept()
+hub.flush_all()
+late2.settimeout(1.0)
+time.sleep(0.05)
+check("a late client gets the latest greeting of every kind, in order",
+      late2.recv(4096) == b'{"type":"CTRL_CONNECTED"}\n{"type":"OPTIONS","dnd":true}\n')
+late2.close()
+for i in range(20):
+    hub.greet('{"type":"K%d"}' % i)
+check("greetings are capped by kind", len(hub.greetings) <= mod.ControlHub.MAX_GREETINGS)
+hub.greet('{"type":"BIG","x":"' + "y" * (mod.MAX_LINE + 10) + '"}')
+check("an oversized greeting is not kept", b"BIG" not in b"".join(hub.greetings.values()))
 
 # Greeting a client must never cost us its command. `omarchy-sip send` is
 # fire-and-forget: it writes one line and closes, so it is already gone when

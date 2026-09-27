@@ -95,6 +95,7 @@ CONTACTS = "contacts"
 CONFIG = "config"
 RINGTONE = "ring.wav"
 HISTORY = "history.jsonl"
+OPTIONS = "options.json"
 BARESIP_LOG = "baresip.log"
 CONTROL = "control"
 UNIT = "omarchy-sip.service"
@@ -543,6 +544,43 @@ def account_entry() -> dict | None:
     return None
 
 
+# Settings the daemon acts on by itself -- it runs whether or not the shell
+# does, so it cannot read the panel's settings from shell.json. The panel
+# writes them here (`omarchy-sip option set`); only these keys, only booleans.
+MAX_OPTIONS_FILE = 4096
+OPTION_DEFAULTS = {
+    "notifications": True,   # incoming-call and missed-call notifications
+    "regAlerts": True,       # notify when registration has been lost a while
+    "dnd": False,            # reject incoming calls with 480, still log them
+    "aec": False,            # load webrtc_aec (needs a daemon restart)
+}
+
+
+def read_options(dir_fd: int | None = None) -> dict:
+    """The daemon's options: defaults, overlaid with any valid stored values.
+
+    An oversized file is clipped, fails to parse, and reads as the defaults;
+    unknown keys and non-boolean values are ignored rather than trusted.
+    """
+    out = dict(OPTION_DEFAULTS)
+    raw = read_bounded(OPTIONS, conf_fd() if dir_fd is None else dir_fd, MAX_OPTIONS_FILE)
+    try:
+        obj = json.loads(raw) if raw.strip() else {}
+    except ValueError:
+        obj = {}
+    if isinstance(obj, dict):
+        for key in OPTION_DEFAULTS:
+            if isinstance(obj.get(key), bool):
+                out[key] = obj[key]
+    return out
+
+
+def write_options(options: dict, dir_fd: int | None = None) -> None:
+    clean = {key: bool(options.get(key, default)) for key, default in OPTION_DEFAULTS.items()}
+    write_private(OPTIONS, json.dumps(clean, separators=(",", ":")) + "\n",
+                  conf_fd() if dir_fd is None else dir_fd)
+
+
 def account_transport() -> str:
     """The transport this account registers with, for sip_transports.
 
@@ -707,8 +745,10 @@ class ControlHub:
         # broadcast once, when baresip's bus comes up, so without this a client
         # that connects later -- which is every client, the daemon outlives the
         # shell -- never learns the daemon is up and never resets its reconnect
-        # backoff. State, not history: only the latest greeting is kept.
-        self.greeting: bytes | None = None
+        # backoff. The same goes for the current options and the last
+        # voicemail summary. State, not history: one record per kind, the
+        # latest, replayed in the order the kinds first appeared.
+        self.greetings: dict[str, bytes] = {}
         try:
             os.unlink(name, dir_fd=dir_fd)   # a stale socket from a crash
         except FileNotFoundError:
@@ -750,8 +790,8 @@ class ControlHub:
             return None
         conn.setblocking(False)
         self.clients[conn] = {"buf": b"", "out": b"", "dropping": False, "wdead": False}
-        if self.greeting is not None:
-            self.send(conn, self.greeting)
+        for record in self.greetings.values():
+            self.send(conn, record)
         return conn
 
     def drop(self, conn: socket.socket) -> None:
@@ -813,9 +853,21 @@ class ControlHub:
         for conn in list(self.clients):
             self.send(conn, data)
 
-    def greet(self, text: str) -> None:
-        """Broadcast a record and keep it as the greeting for future clients."""
-        self.greeting = (text + "\n").encode("utf-8", "replace")
+    MAX_GREETINGS = 8
+
+    def greet(self, text: str, kind: str | None = None) -> None:
+        """Broadcast a record and keep it as the greeting of its kind.
+
+        `kind` defaults to the record's own "type". A record too large for a
+        line is broadcast as the usual marker and not kept.
+        """
+        if kind is None:
+            try:
+                kind = str(json.loads(text).get("type") or "")
+            except (ValueError, AttributeError):
+                kind = ""
+        if len(text) <= MAX_LINE and (kind in self.greetings or len(self.greetings) < self.MAX_GREETINGS):
+            self.greetings[kind] = (text.replace("\r", " ").replace("\n", " ") + "\n").encode("utf-8", "replace")
         self.broadcast(text)
 
     def send(self, conn: socket.socket, data: bytes) -> None:
@@ -1216,6 +1268,15 @@ def cmd_daemon(_args) -> int:
     # reconnects throughout the daemon's life and needs this on every connect.
     hub.greet(json.dumps({"type": "CTRL_CONNECTED"}, separators=(",", ":")))
 
+    options = read_options()
+    hub.greet(json.dumps({"type": "OPTIONS", **options}, separators=(",", ":")))
+
+    def local(name: str, params: str, token: str) -> None:
+        nonlocal options
+        if name == "reload-options":
+            options = read_options()
+            hub.greet(json.dumps({"type": "OPTIONS", **options}, separators=(",", ":")))
+
     tracker = CallTracker(conf_fd())
     sel = selectors.DefaultSelector()
     sel.register(bus.fileno(), selectors.EVENT_READ, "bus")
@@ -1264,7 +1325,7 @@ def cmd_daemon(_args) -> int:
                 else:
                     conn = key.fileobj
                     for line in hub.read_commands(conn):
-                        dispatch(bus, hub, line)
+                        dispatch(bus, hub, line, local)
                     if conn not in hub.clients:
                         sel.unregister(conn)
             hub.flush_all()
@@ -1299,7 +1360,14 @@ _COMMAND_GRAMMAR: dict[str, "re.Pattern[str] | None"] = {
 }
 
 
-def dispatch(bus: "BaresipBus", hub: "ControlHub", line: bytes) -> None:
+# Commands the daemon answers itself; they never reach baresip. Same shape as
+# _COMMAND_GRAMMAR, checked the same way.
+_LOCAL_GRAMMAR: dict[str, "re.Pattern[str] | None"] = {
+    "reload-options": None,
+}
+
+
+def dispatch(bus: "BaresipBus", hub: "ControlHub", line: bytes, local=None) -> None:
     """Turn one allowed client command line into a baresip `invoke`.
 
     The client protocol is unchanged from the ctrl_tcp days -- one JSON object
@@ -1325,17 +1393,23 @@ def dispatch(bus: "BaresipBus", hub: "ControlHub", line: bytes) -> None:
     token = clip(obj.get("token") or "", 128)
     params = str(obj.get("params") or "").strip()
 
-    if name not in _COMMAND_GRAMMAR:
+    is_local = name in _LOCAL_GRAMMAR
+    if not is_local and name not in _COMMAND_GRAMMAR:
         allowed = False
     else:
-        grammar = _COMMAND_GRAMMAR[name]
+        grammar = _LOCAL_GRAMMAR[name] if is_local else _COMMAND_GRAMMAR[name]
         allowed = (grammar is None and not params) or (grammar is not None and grammar.match(params) is not None)
+    if allowed and is_local and local is None:
+        allowed = False
     if not allowed:
         if token:
             hub.broadcast(json.dumps(
                 {"response": True, "ok": False, "data": "command not permitted", "token": token},
                 separators=(",", ":"),
             ))
+        return
+    if is_local:
+        local(name, params, token)
         return
     bus.invoke(f"{name} {params}" if params else name, token)
 
@@ -1534,6 +1608,49 @@ def cmd_events(_args) -> int:
     return 0
 
 
+def parse_bool(value: str) -> bool:
+    value = str(value or "").strip().lower()
+    if value in ("on", "yes", "true", "1"):
+        return True
+    if value in ("off", "no", "false", "0"):
+        return False
+    die(f"expected on/off, got {value!r}")
+
+
+def call_in_progress() -> bool:
+    if not daemon_up():
+        return False
+    reply = request("listcalls", timeout=3)
+    text = str((reply or {}).get("data") or "")
+    match = re.search(r"Active calls \((\d+)\)", text)
+    return bool(match and int(match.group(1)) > 0)
+
+
+def cmd_option(args) -> int:
+    options = read_options()
+    if args.action == "show":
+        print(json.dumps(options, separators=(",", ":")))
+        return 0
+    if args.key not in OPTION_DEFAULTS or args.value is None:
+        die(f"usage: option set <{'|'.join(OPTION_DEFAULTS)}> <on|off>")
+    value = parse_bool(args.value)
+    changed = options[args.key] != value
+    options[args.key] = value
+    write_options(options)
+    if daemon_up():
+        send_command(command_json("reload-options", None, "cli"))
+    # Echo cancellation is a module in baresip's config, so it only takes
+    # effect when baresip starts -- and restarting drops any call in progress.
+    if args.key == "aec" and changed:
+        ensure_config()
+        if call_in_progress():
+            print("omarchy-sip: echo cancellation takes effect after this call (restart the daemon then)")
+        else:
+            restart_if_live()
+    print(f"omarchy-sip: {args.key} {'on' if value else 'off'}")
+    return 0
+
+
 def cmd_history(args) -> int:
     print(json.dumps(read_history(args.limit), separators=(",", ":")))
     return 0
@@ -1552,6 +1669,7 @@ def cmd_status(_args) -> int:
         # single parse. Pulling state out of the prose is Model.js's job.
         "reginfo": clip_reply(request("reginfo", timeout=3)) if up else None,
         "calls": clip_reply(request("listcalls", timeout=3)) if up else None,
+        "options": read_options(),
     }
     print(json.dumps(snapshot, separators=(",", ":")))
     return 0
@@ -1743,6 +1861,12 @@ def main(argv: list[str]) -> int:
     p = sub.add_parser("history", help="recent calls as JSON, most recent first")
     p.add_argument("--limit", type=int, default=10)
     p.set_defaults(func=cmd_history)
+
+    p = sub.add_parser("option", help="show or set the daemon's own options")
+    p.add_argument("action", choices=["show", "set"], nargs="?", default="show")
+    p.add_argument("key", nargs="?")
+    p.add_argument("value", nargs="?")
+    p.set_defaults(func=cmd_option)
 
     p = sub.add_parser("dial", help="place a call")
     p.add_argument("uri")
