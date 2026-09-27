@@ -19,6 +19,10 @@ Panel {
   ipcTarget: "io.github.17xande.simple-sip"
   manageIpc: false
 
+  // Host-injected, capability-scoped to this plugin's own lifecycle. Its
+  // summon/toggle route through the bar to the copy on the focused monitor.
+  property var shell: null
+
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color urgent: bar ? bar.urgent : Color.urgent
   readonly property color dim: Qt.darker(foreground, 1.55)
@@ -62,7 +66,12 @@ Panel {
   }
 
   function buildRows() {
-    if (!sip.daemonUp) return [{ id: "start", label: "Start SIP daemon", glyph: "\uf04b" }]
+    // Account settings stay reachable while the daemon is down: an account
+    // baresip refuses is one reason it might be, and this is where it is fixed.
+    if (!sip.daemonUp) return setupForm.visible
+      ? [{ id: "start", label: "Start SIP daemon", glyph: "\uf04b" }]
+      : [{ id: "start", label: "Start SIP daemon", glyph: "\uf04b" },
+         { id: "setup", label: "Account settings", glyph: "\uf013" }]
     if (setupForm.visible) return []
     if (sip.callState === "incoming") return [
       { id: "answer", label: "Answer", glyph: "\uf095" },
@@ -107,6 +116,28 @@ Panel {
   function close() {
     root.controller.hide()
     setupOpen = false
+  }
+
+  // The bar builds one copy of this widget per monitor, each with its own
+  // Service. Anything that must happen once -- opening the panel for a call,
+  // pausing media, syncing settings to the daemon -- is done by the first
+  // copy only. Falls back to "yes" when the host offers no way to tell.
+  readonly property bool isLeader: {
+    if (!bar || typeof bar.moduleWidgets !== "function") return true
+    var items = bar.moduleWidgets(moduleName)
+    return items.length === 0 || items[0] === root
+  }
+
+  // Open on the focused monitor rather than whichever copy happened to run
+  // this. The shell facade picks the copy; without it, open this one.
+  function summonHere() {
+    if (shell && typeof shell.summon === "function" && shell.summon(moduleName, "")) return
+    root.open()
+  }
+
+  function toggleHere() {
+    if (shell && typeof shell.toggle === "function") { shell.toggle(moduleName, ""); return }
+    root.toggle()
   }
 
   // Opening the form shows the account as it is, so changing one field does
@@ -162,23 +193,27 @@ Panel {
     // Ringing is the one thing worth interrupting for: surface the panel so
     // Answer is one click away rather than buried behind the bar icon.
     onIncomingCall: function(peerUri) {
-      if (sip.boolSetting("autoOpenOnIncoming", true) && !root.opened) root.open()
+      if (root.isLeader && sip.boolSetting("autoOpenOnIncoming", true)) root.summonHere()
     }
   }
 
   IpcHandler {
     target: root.ipcTarget
-    function open(): void { root.open() }
+    function open(): void { root.summonHere() }
     function close(): void { root.close() }
-    function show(): void { root.open() }
+    function show(): void { root.summonHere() }
     function hide(): void { root.close() }
-    function toggle(): void { root.toggle() }
-    function dial(uri: string): string { sip.dial(uri); return "ok" }
-    function answer(): string { sip.answer(); return "ok" }
-    function hangup(): string { sip.hangup(); return "ok" }
+    function toggle(): void { root.toggleHere() }
+    function dial(uri: string): string { return root.ipcResult(sip.dial(uri)) }
+    function answer(): string { return root.ipcResult(sip.answer()) }
+    function hangup(): string { return root.ipcResult(sip.hangup()) }
     function status(): string {
       return sip.callState + " " + (sip.peer || "-") + " " + sip.registration
     }
+  }
+
+  function ipcResult(reason) {
+    return reason ? "refused: " + reason : "ok"
   }
 
   // ------------------------------------------------------------- bar button
@@ -441,7 +476,7 @@ Panel {
 
           Column {
             id: setupForm
-            visible: sip.daemonUp && (!sip.configured || root.setupOpen)
+            visible: !sip.configured || root.setupOpen
             width: parent.width
             spacing: Style.space(8)
 

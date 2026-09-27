@@ -5,9 +5,9 @@ import "Model.js" as Model
 
 // Owns everything stateful about the SIP account and the current call.
 //
-// The `omarchy-sip` daemon holds baresip's single control connection; this
-// service reads its JSON journal (one object per line) and pushes commands
-// back. Call state is driven by *events*, never by polling -- the status
+// The `omarchy-sip` daemon holds baresip's control connection; this service
+// reads its event stream (one JSON object per line, via `omarchy-sip events`)
+// and pushes commands back. Call state is driven by *events*, never by polling -- the status
 // snapshot exists only to resync after a shell restart, when the last
 // registration event may be minutes in the past.
 Item {
@@ -212,15 +212,18 @@ Item {
     return (buf === "" ? text : buf + " " + text).substring(0, maxErrorChars)
   }
 
+  // dial/answer/hangup return "" when the command went out, or why it did
+  // not -- which the IpcHandler hands back instead of an unconditional "ok".
   function dial(input) {
+    if (onCall || callState === "incoming") return "a call is already in progress"
     var target = Model.normalizeTarget(input, aor)
-    if (target === "") return
+    if (target === "") return "nothing to dial"
     // Refuse here what the daemon would refuse there. Its refusal does come
     // back (see "commandFailed" below), but only after the panel has already
     // said "Calling…" -- checking first means it never says it.
     if (!Model.validTarget(target)) {
       lastError = elide("Can't dial " + target)
-      return
+      return "not a dialable address: " + target
     }
     // Optimistic: the panel switches to "calling" immediately and the real
     // CALL_OUTGOING / CALL_CLOSED event corrects it a moment later.
@@ -228,7 +231,11 @@ Item {
     callState = "outgoing"
     peer = Model.peerLabel(target)
     callStartedAt = 0
-    if (!command("dial", target)) refresh()
+    if (!command("dial", target)) {
+      refresh()
+      return "too many commands queued"
+    }
+    return ""
   }
 
   // Mirrors dial(): a caller that fires while another action is still in
@@ -236,13 +243,15 @@ Item {
   // back to back) must not have its command silently dropped with the UI
   // left showing a call state that no longer matches what actually happened.
   function answer() {
-    if (callState !== "incoming") return
-    if (!command("accept")) refresh()
+    if (callState !== "incoming") return "no call is ringing"
+    if (!command("accept")) { refresh(); return "too many commands queued" }
+    return ""
   }
 
   function hangup() {
-    if (callState === "idle") return
-    if (!command("hangup")) refresh()
+    if (callState === "idle") return "no call in progress"
+    if (!command("hangup")) { refresh(); return "too many commands queued" }
+    return ""
   }
 
   function startDaemon() { run(["start"]) }
@@ -284,7 +293,7 @@ Item {
 
   function handleLine(line) {
     var text = String(line || "")
-    // The journal caps its own records, but this listener runs for the whole
+    // The CLI caps its own records, but this listener runs for the whole
     // shell session: refuse an oversized line before it reaches JSON.parse.
     if (text.length > maxLineChars) return
     text = text.trim()
@@ -293,7 +302,7 @@ Item {
     try {
       event = JSON.parse(text)
     } catch (e) {
-      return   // not ours; the journal only ever holds JSON, so ignore quietly
+      return   // not ours; the stream only ever carries JSON, so ignore quietly
     }
 
     var update = Model.classifyEvent(event)

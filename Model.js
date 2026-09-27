@@ -9,7 +9,7 @@
 // prose-scraping for the second, so that mess lives in exactly one place.
 
 // baresip colours some status text (print_scode emits green "OK ", red "ERR"),
-// and those escapes survive into the ctrl_tcp response.
+// and those escapes survive into the command responses relayed from ctrl_dbus.
 function stripAnsi(text) {
   return String(text || "").replace(/\x1b\[[0-9;]*[A-Za-z]|\[[0-9;]*m/g, "")
 }

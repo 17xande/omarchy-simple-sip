@@ -33,13 +33,25 @@ stdlib plus jeepney — no pip packages, no build step, no compiled binary.
 ## Install
 
 ```bash
-omarchy plugin add https://github.com/<you>/omarchy-simple-sip --enable
+omarchy plugin add https://github.com/17xande/omarchy-simple-sip --enable
+```
+
+Then click **Start SIP daemon** in the panel, or run the same step from a terminal:
+
+```bash
 ~/.config/omarchy/plugins/io.github.17xande.simple-sip/bin/omarchy-sip install
 ```
 
-`install` generates the baresip config, writes a `systemd --user` unit and starts it.
-The daemon holds the SIP registration continuously, so calls arrive even when the
-panel is closed and across shell restarts.
+Either way this generates the baresip config, writes a `systemd --user` unit and
+starts it. The daemon holds the SIP registration continuously, so calls arrive even
+when the panel is closed and across shell restarts.
+
+The examples below call the CLI as `omarchy-sip`. It is not put on your `PATH`;
+either use the full path above or add an alias:
+
+```bash
+alias omarchy-sip=~/.config/omarchy/plugins/io.github.17xande.simple-sip/bin/omarchy-sip
+```
 
 Then set your account — either in the panel (the setup form appears until an account
 exists) or from a terminal, which keeps the password out of your shell history:
@@ -48,10 +60,27 @@ exists) or from a terminal, which keeps the password out of your shell history:
 
 ```bash
 read -rs PASSWORD
-printf '%s' "$PASSWORD" | omarchy-sip account set sip:you@pbx.example.com \
-    --auth-user you --transport tls
+printf '%s' "$PASSWORD" | omarchy-sip account set sip:1001@pbx.example.com \
+    --auth-user 1001 --transport tls
 unset PASSWORD
 ```
+
+The address must include the user part — `sip:1001@pbx.example.com`, not
+`sip:pbx.example.com`; baresip refuses an account without one and registers
+nothing. The panel's form fills it in from the auth username if you type only the
+server. Saving the form keeps anything you leave blank, including the password;
+from a terminal, `account set --merge` does the same.
+
+## Remove
+
+```bash
+~/.config/omarchy/plugins/io.github.17xande.simple-sip/bin/omarchy-sip uninstall
+omarchy plugin remove io.github.17xande.simple-sip
+```
+
+`uninstall` stops the daemon and removes the `systemd --user` unit. Your account,
+call history and generated config stay in `~/.config/omarchy-sip`; delete that
+directory too to remove every trace, including the stored SIP password.
 
 ## Using it
 
@@ -90,10 +119,13 @@ installing a plugin never writes to your Hyprland config. Add what you want to
 `~/.config/hypr/bindings.conf`:
 
 ```
-bindd = SUPER SHIFT, T, SIP dialer, exec, omarchy-shell io.github.17xande.simple-sip toggle
+bindd = SUPER SHIFT, T, SIP dialer, exec, omarchy-shell shell toggle io.github.17xande.simple-sip ""
 bindd = SUPER, F9, Answer SIP call, exec, omarchy-shell io.github.17xande.simple-sip answer
 bindd = SUPER SHIFT, F9, Hang up SIP call, exec, omarchy-shell io.github.17xande.simple-sip hangup
 ```
+
+`shell toggle` opens the panel on the focused monitor. The bar builds one copy of
+the widget per monitor, and a plugin's own IPC target reaches only one of them.
 
 `SUPER+SHIFT+T` is unbound in a default Omarchy install. Note that `SUPER+SHIFT+P`
 is **not** free — Omarchy binds it to Google Photos.
