@@ -30,19 +30,26 @@
       "ringNotifications": true,
       "autoOpenOnIncoming": true,
       "statusRefreshSec": 60,
-      "historyLimit": 5
+      "historyLimit": 5,
+      "registrationAlerts": true
     },
     "schema": [
       {
         "key": "ringNotifications",
         "type": "boolean",
-        "label": "Notify on incoming calls",
+        "label": "Notify on incoming and missed calls",
         "defaultValue": true
       },
       {
         "key": "autoOpenOnIncoming",
         "type": "boolean",
         "label": "Open the panel when a call comes in",
+        "defaultValue": true
+      },
+      {
+        "key": "registrationAlerts",
+        "type": "boolean",
+        "label": "Notify when the SIP registration is lost",
         "defaultValue": true
       },
       {

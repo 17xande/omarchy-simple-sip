@@ -112,6 +112,7 @@ t("optionChanges holds aec back during a call", M.optionChanges({ aec: true }, {
 t("optionChanges applies aec when idle", M.optionChanges({ aec: true }, { aec: false }, {}, true), [["aec", true]]);
 t("optionChanges ignores a key the daemon has not reported", M.optionChanges({ aec: true }, {}, {}, true), []);
 
+t("classify show panel", M.classifyEvent({ type: "SHOW_PANEL" }), { kind: "showPanel" });
 t("duration 95s", M.durationText(1000, 1000 + 95000), "01:35");
 t("duration hours", M.durationText(1, 1 + 3725000), "1:02:05");
 t("duration unset", M.durationText(0, 5000), "");

@@ -40,6 +40,10 @@ function classifyEvent(ev) {
   case "CTRL_FAILED":
     return { kind: "ctrl", connected: false, error: (ev && ev.reason) || "" }
 
+  // -- a notification was clicked; the daemon cannot open the panel itself
+  case "SHOW_PANEL":
+    return { kind: "showPanel" }
+
   // -- the daemon's own options, replayed to every client on connect
   case "OPTIONS":
     return { kind: "options", options: pickOptions(ev) }

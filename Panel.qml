@@ -196,6 +196,7 @@ Panel {
     onIncomingCall: function(peerUri) {
       if (root.isLeader && sip.boolSetting("autoOpenOnIncoming", true)) root.summonHere()
     }
+    onShowRequested: if (root.isLeader) root.summonHere()
   }
 
   IpcHandler {

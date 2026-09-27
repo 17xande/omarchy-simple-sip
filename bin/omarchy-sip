@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import html
 import json
 import math
 import os
@@ -1159,6 +1160,236 @@ class BaresipBus:
             pass
 
 
+NOTIFY_NAME = "org.freedesktop.Notifications"
+NOTIFY_PATH = "/org/freedesktop/Notifications"
+MAX_NOTIFY_TEXT = 200
+
+
+def notify_text(value) -> str:
+    """Caller-controlled text made safe for a notification body.
+
+    The notification server advertises body-markup, so a display name of
+    `<a href=...>` would be rendered, not shown. Escape it, flatten it to one
+    line, and clip it.
+    """
+    text = " ".join(str(value or "").split())
+    if len(text) > MAX_NOTIFY_TEXT:
+        text = text[: MAX_NOTIFY_TEXT - 1] + "…"
+    return html.escape(text, quote=False)
+
+
+class Notifier:
+    """Desktop notifications, sent by the daemon on its own session-bus
+    connection so they work while the shell is restarting, and exactly once
+    however many monitors the bar spans.
+
+    Notifications are addressed by a key of our choosing ("call:<id>",
+    "reg"); the server's numeric ids are learnt from Notify's reply and
+    mapped back. Nothing here can take the daemon down: a server that is
+    missing (the shell is between restarts) or a connection that fails only
+    means no notification.
+    """
+
+    def __init__(self) -> None:
+        self.conn = None
+        self.addr = DBusAddress(NOTIFY_PATH, bus_name=NOTIFY_NAME, interface=NOTIFY_NAME)
+        self.pending: dict[int, str] = {}   # Notify serial -> key
+        self.ids: dict[str, int] = {}       # key -> server id
+        self.close_on_reply: set[str] = set()
+        try:
+            self.conn = open_dbus_connection(bus="SESSION")
+            rule = MatchRule(type="signal", interface=NOTIFY_NAME, path=NOTIFY_PATH)
+            self.conn.send_and_get_reply(message_bus.AddMatch(rule), timeout=5)
+            self.conn.sock.setblocking(False)
+        except Exception:
+            self.close()
+
+    def fileno(self) -> int:
+        return self.conn.sock.fileno() if self.conn else -1
+
+    def _send(self, method: str, signature: str, body: tuple) -> int | None:
+        if self.conn is None:
+            return None
+        msg = new_method_call(self.addr, method, signature, body)
+        serial = next(self.conn.outgoing_serial)
+        try:
+            self.conn.send(msg, serial=serial)
+        except OSError:
+            self.close()
+            return None
+        return serial
+
+    def notify(self, key: str, summary: str, body: str, actions=(), urgency: int = 1,
+               category: str = "", replace: bool = False) -> None:
+        hints = {"urgency": ("y", urgency)}
+        if category:
+            hints["category"] = ("s", category)
+        replaces = self.ids.get(key, 0) if replace else 0
+        flat: list[str] = []
+        for name, label in actions:
+            flat += [name, label]
+        serial = self._send("Notify", "susssasa{sv}i", (
+            "Simple SIP", replaces, "call-start-symbolic", summary, body, flat, hints, -1,
+        ))
+        if serial is not None and len(self.pending) < MAX_PENDING:
+            self.pending[serial] = key
+        self.close_on_reply.discard(key)
+
+    def close_key(self, key: str) -> None:
+        nid = self.ids.pop(key, None)
+        if nid is not None:
+            self._send("CloseNotification", "u", (nid,))
+        elif key in self.pending.values():
+            self.close_on_reply.add(key)   # the reply with its id is still coming
+
+    def pump(self):
+        """Yield (key, action) for every action button pressed."""
+        if self.conn is None:
+            return
+        try:
+            chunk = self.conn.sock.recv(65536)
+        except BlockingIOError:
+            return
+        except OSError:
+            chunk = b""
+        if not chunk:
+            self.close()
+            return
+        self.conn.parser.add_data(chunk)
+        while True:
+            msg = self.conn.parser.get_next_message()
+            if msg is None:
+                return
+            mtype = msg.header.message_type
+            if mtype in (MessageType.method_return, MessageType.error):
+                key = self.pending.pop(msg.header.fields.get(HEADER_REPLY_SERIAL), None)
+                if key is None or mtype is MessageType.error or not msg.body:
+                    continue
+                self.ids[key] = int(msg.body[0])
+                if key in self.close_on_reply:
+                    self.close_on_reply.discard(key)
+                    self.close_key(key)
+            elif mtype is MessageType.signal:
+                member = msg.header.fields.get(HEADER_MEMBER)
+                if member == "ActionInvoked" and len(msg.body) >= 2:
+                    nid, action = int(msg.body[0]), str(msg.body[1])
+                    for key, known in list(self.ids.items()):
+                        if known == nid:
+                            yield key, action
+                elif member == "NotificationClosed" and msg.body:
+                    nid = int(msg.body[0])
+                    for key, known in list(self.ids.items()):
+                        if known == nid:
+                            del self.ids[key]
+
+    def close(self) -> None:
+        if self.conn is not None:
+            try:
+                self.conn.close()
+            except OSError:
+                pass
+        self.conn = None
+
+
+REG_ALERT_AFTER = 30.0   # seconds of lost registration before we say so
+
+
+class CallAlerts:
+    """Decides what the daemon notifies, from baresip's own events.
+
+    Pure logic over a notifier and `invoke`/`show` callbacks, so it runs
+    under test with fakes. Clicking an incoming-call notification (the
+    "default" action) asks the panel to open; Answer/Reject buttons act on
+    baresip directly, for servers that draw them -- Omarchy's own server runs
+    only the default action, on click. Answering closes the notification; a
+    call that ends unanswered turns it into "Missed call". Registration that has been
+    failing for REG_ALERT_AFTER seconds, after having worked, is reported
+    once and withdrawn when it recovers.
+    """
+
+    def __init__(self, notifier, options, invoke, clock=time.monotonic, show=None) -> None:
+        self.notifier = notifier
+        self.options = options          # callable -> current options dict
+        self.invoke = invoke            # callable(line) -> None
+        self.show = show or (lambda: None)   # ask the panel to open
+        self.clock = clock
+        self.ringing: dict[str, str] = {}   # call id -> caller label
+        self.answered: set[str] = set()
+        self.ever_registered = False
+        self.lost_since: float | None = None
+        self.reg_error = ""
+        self.reg_alerted = False
+
+    @staticmethod
+    def caller(event: dict) -> str:
+        return peer_uri(event.get("peeruri") or "").partition(":")[2] or "unknown caller"
+
+    def handle(self, event: dict) -> None:
+        etype = event.get("type")
+        call_id = str(event.get("id") or "-")
+        opts = self.options()
+        if etype == "CALL_INCOMING":
+            self.ringing[call_id] = self.caller(event)
+            if opts.get("notifications"):
+                self.notifier.notify(
+                    f"call:{call_id}", "Incoming call", notify_text(self.ringing[call_id]),
+                    actions=(("default", "Open"), ("answer", "Answer"), ("reject", "Reject")),
+                    urgency=2, category="call.incoming",
+                )
+        elif etype in ("CALL_ANSWERED", "CALL_ESTABLISHED"):
+            if call_id in self.ringing:
+                self.answered.add(call_id)
+                self.notifier.close_key(f"call:{call_id}")
+        elif etype == "CALL_CLOSED":
+            label = self.ringing.pop(call_id, None)
+            answered = call_id in self.answered
+            self.answered.discard(call_id)
+            if label is None:
+                return
+            if not answered and opts.get("notifications"):
+                self.notifier.notify(
+                    f"call:{call_id}", "Missed call", notify_text(label),
+                    urgency=1, category="call.unanswered", replace=True,
+                )
+            else:
+                self.notifier.close_key(f"call:{call_id}")
+        elif etype == "REGISTER_OK":
+            self.ever_registered = True
+            self.lost_since = None
+            if self.reg_alerted:
+                self.reg_alerted = False
+                self.notifier.close_key("reg")
+        elif etype == "REGISTER_FAIL":
+            self.reg_error = str(event.get("param") or "")
+            if self.ever_registered and self.lost_since is None:
+                self.lost_since = self.clock()
+
+    def tick(self) -> None:
+        """Called from the daemon loop; raises the registration alert when due."""
+        if self.lost_since is None or self.reg_alerted:
+            return
+        if self.clock() - self.lost_since < REG_ALERT_AFTER:
+            return
+        if not self.options().get("regAlerts"):
+            return
+        self.reg_alerted = True
+        detail = f" ({notify_text(self.reg_error)})" if self.reg_error else ""
+        self.notifier.notify(
+            "reg", "SIP registration lost",
+            f"Calls won't reach you until it recovers{detail}.", urgency=1,
+        )
+
+    def action(self, key: str, action: str) -> None:
+        if not key.startswith("call:") or key[5:] not in self.ringing:
+            return
+        if action == "answer":
+            self.invoke("accept")
+        elif action == "reject":
+            self.invoke("hangup")
+        elif action == "default":
+            self.show()
+
+
 def bus_name_taken() -> bool:
     """Is another baresip already exporting the control interface?
 
@@ -1278,9 +1509,16 @@ def cmd_daemon(_args) -> int:
             hub.greet(json.dumps({"type": "OPTIONS", **options}, separators=(",", ":")))
 
     tracker = CallTracker(conf_fd())
+    notifier = Notifier()
+    alerts = CallAlerts(
+        notifier, lambda: options, lambda line: bus.invoke(line, "notify"),
+        show=lambda: hub.broadcast(json.dumps({"type": "SHOW_PANEL"}, separators=(",", ":"))),
+    )
     sel = selectors.DefaultSelector()
     sel.register(bus.fileno(), selectors.EVENT_READ, "bus")
     sel.register(hub.sock, selectors.EVENT_READ, "listen")
+    if notifier.fileno() >= 0:
+        sel.register(notifier.fileno(), selectors.EVENT_READ, "notify")
 
     try:
         while True:
@@ -1308,9 +1546,12 @@ def cmd_daemon(_args) -> int:
                             text = item[1]
                             hub.broadcast(text)
                             try:
-                                tracker.handle(json.loads(text))
+                                event = json.loads(text)
                             except ValueError:
-                                pass
+                                continue
+                            if isinstance(event, dict):
+                                tracker.handle(event)
+                                alerts.handle(event)
                         else:
                             _, token, text, ok = item
                             hub.broadcast(json.dumps(
@@ -1318,6 +1559,11 @@ def cmd_daemon(_args) -> int:
                                  "data": clip(text, MAX_REPLY_CHARS), "token": token},
                                 separators=(",", ":"),
                             ))
+                elif key.data == "notify":
+                    for nkey, action in list(notifier.pump()):
+                        alerts.action(nkey, action)
+                    if notifier.conn is None:
+                        sel.unregister(key.fileobj)
                 elif key.data == "listen":
                     conn = hub.accept()
                     if conn is not None:
@@ -1329,9 +1575,11 @@ def cmd_daemon(_args) -> int:
                     if conn not in hub.clients:
                         sel.unregister(conn)
             hub.flush_all()
+            alerts.tick()
             cap_baresip_log(log_fd)
     finally:
         sel.close()
+        notifier.close()
         bus.close()
         os.close(log_fd)
         hub.close()

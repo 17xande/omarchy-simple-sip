@@ -123,6 +123,8 @@ Item {
   })
 
   signal incomingCall(string peerUri)
+  // A notification was clicked. The panel decides which copy opens.
+  signal showRequested()
 
   readonly property int statusRefreshSec: intSetting("statusRefreshSec", 60, 10, 600)
   readonly property int historyLimit: intSetting("historyLimit", 5, 0, 20)
@@ -198,7 +200,8 @@ Item {
   // here: it is toggled at run time and lives only in the daemon.
   function wantedOptions() {
     return {
-      notifications: boolSetting("ringNotifications", true)
+      notifications: boolSetting("ringNotifications", true),
+      regAlerts: boolSetting("registrationAlerts", true)
     }
   }
 
@@ -371,6 +374,11 @@ Item {
       return
     }
 
+    if (update.kind === "showPanel") {
+      root.showRequested()
+      return
+    }
+
     if (update.kind === "options") {
       daemonOptions = update.options
       pendingOptions = ({})
@@ -408,26 +416,11 @@ Item {
   }
 
   // Ringing is the one state the panel must never miss, so both the event
-  // stream and a status resync funnel through here.
+  // stream and a status resync funnel through here. The notification itself
+  // is the daemon's job now (see CallAlerts in the CLI): it is sent once, has
+  // Answer/Reject buttons, and works while the shell is restarting.
   function announceIncoming() {
-    notifyIncoming(peer)
     root.incomingCall(peer)
-  }
-
-  function notifyIncoming(peerUri) {
-    if (!boolSetting("ringNotifications", true)) return
-    // Critical urgency so it survives Do Not Disturb -- a missed call is worse
-    // than an interruption, and the notification is the only cue when the
-    // panel is closed.
-    Quickshell.execDetached({
-      command: [
-        "/usr/bin/notify-send", "-u", "critical", "-a", "Simple SIP",
-        "-i", "call-start-symbolic",
-        "Incoming call", peerUri || "unknown caller"
-      ],
-      environment: root.cleanEnv(),
-      clearEnvironment: true
-    })
   }
 
   function applyStatus(text) {
