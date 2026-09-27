@@ -40,6 +40,13 @@ function classifyEvent(ev) {
   case "CTRL_FAILED":
     return { kind: "ctrl", connected: false, error: (ev && ev.reason) || "" }
 
+  // -- a sip:/tel: link was opened: fill the dial field, never dial
+  case "PREFILL": {
+    var target = String((ev && ev.target) || "")
+    return /^(\+?[0-9*#]{1,32}|sips?:[A-Za-z0-9._~:\/@%+*#-]{1,250})$/.test(target)
+      ? { kind: "prefill", target: target } : null
+  }
+
   // -- a notification was clicked; the daemon cannot open the panel itself
   case "SHOW_PANEL":
     return { kind: "showPanel" }

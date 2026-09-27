@@ -293,6 +293,16 @@ Panel {
       if (root.isLeader && sip.boolSetting("autoOpenOnIncoming", true)) root.summonHere()
     }
     onShowRequested: if (root.isLeader) root.summonHere()
+    // A clicked link fills the dial field and opens the panel; the person
+    // presses Enter. It never dials by itself -- a web page must not be able
+    // to place a call. Every copy fills its own field, since the copy that
+    // opens is the one on the focused monitor, not necessarily this one.
+    onPrefillRequested: function(target) {
+      if (sip.callState !== "idle") return
+      root.dialText = target
+      root.cursorActive = false
+      if (root.isLeader) root.summonHere()
+    }
   }
 
   IpcHandler {

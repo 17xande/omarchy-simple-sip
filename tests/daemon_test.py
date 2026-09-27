@@ -204,5 +204,65 @@ check("contacts remove deletes it", r.returncode == 0 and json.loads(contacts().
 check("removing an unknown contact says so", contacts("remove", "sip:1001@pbx").returncode != 0)
 check("the contacts file is private", oct(os.stat(os.path.join(cdir, "contacts")).st_mode & 0o777) == "0o600")
 
+# ------------------------------------------------------------ click-to-call
+
+for url, want in (
+    ("tel:+1-555-0100;phone-context=example.com", "+15550100"),
+    ("tel:+1%20(555)%20010-0100", "+15550100100"),
+    ("TEL:1001", "1001"),
+    ("sip:1001@pbx.example.com;transport=tcp?Subject=hi", "sip:1001@pbx.example.com"),
+    ("sips:bob@x.com", "sips:bob@x.com"),
+    ("sip://1001@pbx", "sip:1001@pbx"),
+):
+    check(f"link {url!r} fills {want!r}", mod.link_target(url) == want)
+for url in ("http://evil", "tel:", "tel:12%0aquit", "sip:a@b%0ahangup", "tel:" + "1" * 40,
+            "javascript:alert(1)", "sip:a b@c", "", "x" * 600):
+    check(f"link {url[:30]!r} is refused", mod.link_target(url) == "")
+
+
+class Hub:
+    def __init__(self):
+        self.sent = []
+
+    def broadcast(self, text):
+        self.sent.append(json.loads(text))
+
+
+class Bus:
+    def __init__(self):
+        self.calls = []
+
+    def invoke(self, line, token):
+        self.calls.append(line)
+
+
+local_seen = []
+bus, hub = Bus(), Hub()
+mod.dispatch(bus, hub, b'{"command":"prefill","params":"+15550100"}', lambda n, p, t: local_seen.append((n, p)))
+check("prefill is answered by the daemon", local_seen == [("prefill", "+15550100")] and bus.calls == [])
+local_seen.clear()
+for bad in ("sip:a@b;x", "+1 555", "hangup", "123\nquit"):
+    mod.dispatch(Bus(), Hub(), json.dumps({"command": "prefill", "params": bad}).encode(),
+                 lambda n, p, t: local_seen.append(p))
+check("prefill refuses anything that is not a number or dialable address", local_seen == [])
+
+entry = mod.handler_text()
+check("the desktop entry runs the CLI with an isolated interpreter",
+      f'Exec="{mod.PYTHON}" -I "{mod.SELF}" open %u' in entry)
+check("...and claims exactly sip, sips and tel",
+      "MimeType=x-scheme-handler/sip;x-scheme-handler/sips;x-scheme-handler/tel;" in entry)
+orig_self = mod.SELF
+for bad in ('/a"b', "/a$b", "/a%u", "/a`b", "/a\\b"):
+    mod.SELF = bad
+    try:
+        import contextlib, io
+        with contextlib.redirect_stderr(io.StringIO()):
+            mod.handler_text()
+        refused = False
+    except SystemExit:
+        refused = True
+    check(f"a desktop entry is not written for the path {bad!r}", refused)
+mod.SELF = orig_self
+
 print("\nall passed" if not fails else f"\n{fails} FAILED")
 sys.exit(1 if fails else 0)

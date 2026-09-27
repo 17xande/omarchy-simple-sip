@@ -133,6 +133,20 @@ omarchy-sip contacts remove sip:1001@pbx.example.com
 They are stored in baresip's own format in `~/.config/omarchy-sip/contacts`
 (`0600`), at most 200.
 
+### Links
+
+`sip:`, `sips:` and `tel:` links — in a browser, an email, a chat — can open the
+panel with the number already in the dial field:
+
+```bash
+omarchy-sip handler install      # writes ~/.local/share/applications/omarchy-sip-handler.desktop
+omarchy-sip handler uninstall    # removes it (uninstall does too)
+```
+
+A link never dials by itself; you press Enter. A web page should not be able to
+place a call, to a premium-rate number or anywhere else, because of one stray
+click. `omarchy-sip open <link>` does the same from a terminal.
+
 ### Keybindings
 
 Omarchy plugins cannot ship keybindings — the manifest has no such field, and

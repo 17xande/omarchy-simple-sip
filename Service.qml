@@ -144,6 +144,8 @@ Item {
   signal incomingCall(string peerUri)
   // A notification was clicked. The panel decides which copy opens.
   signal showRequested()
+  // A sip:/tel: link was opened: the panel fills its dial field with this.
+  signal prefillRequested(string target)
 
   readonly property int statusRefreshSec: intSetting("statusRefreshSec", 60, 10, 600)
   readonly property int historyLimit: intSetting("historyLimit", 5, 0, 20)
@@ -507,6 +509,11 @@ Item {
 
     if (update.kind === "transferFailed") {
       lastError = elide("Transfer failed" + (update.error ? ": " + update.error : ""))
+      return
+    }
+
+    if (update.kind === "prefill") {
+      root.prefillRequested(update.target)
       return
     }
 

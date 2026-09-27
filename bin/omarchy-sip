@@ -51,6 +51,7 @@ import struct
 import subprocess
 import sys
 import time
+import urllib.parse
 
 try:
     from jeepney import DBusAddress, MatchRule, MessageType, new_method_call
@@ -88,6 +89,9 @@ RUN_DIR = os.path.join(
     os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"), "omarchy-sip"
 )
 UNIT_DIR = os.path.join(HOME, ".config/systemd/user")
+APPS_DIR = os.path.join(HOME, ".local/share/applications")
+HANDLER = "omarchy-sip-handler.desktop"
+HANDLER_SCHEMES = ("sip", "sips", "tel")
 
 # Basenames, not paths: every one of these is opened relative to the descriptor
 # of the directory that holds it, so the full pathname is never re-resolved.
@@ -130,6 +134,7 @@ def trusted_bin(name: str) -> str | None:
 PYTHON = trusted_bin("python3") or sys.executable
 SYSTEMCTL = trusted_bin("systemctl") or "/usr/bin/systemctl"
 BARESIP = trusted_bin("baresip")
+XDG_MIME = trusted_bin("xdg-mime")
 
 # ------------------------------------------------------------------- ceilings
 #
@@ -1591,6 +1596,11 @@ def cmd_daemon(_args) -> int:
         if name == "reload-options":
             options = read_options()
             hub.greet(json.dumps({"type": "OPTIONS", **options}, separators=(",", ":")))
+        elif name == "prefill":
+            hub.broadcast(json.dumps({"type": "PREFILL", "target": params}, separators=(",", ":")))
+            if token:
+                hub.broadcast(json.dumps({"response": True, "ok": True, "data": "", "token": token},
+                                         separators=(",", ":")))
 
     tracker = CallTracker(conf_fd())
     notifier = Notifier()
@@ -1712,8 +1722,14 @@ _COMMAND_GRAMMAR: dict[str, "re.Pattern[str] | None"] = {
 
 # Commands the daemon answers itself; they never reach baresip. Same shape as
 # _COMMAND_GRAMMAR, checked the same way.
+# What a clicked link may put in the dial field: a phone number, or an
+# address the dial grammar accepts.
+PREFILL_TARGET = re.compile(r"^(\+?[0-9*#]{1,32}|sips?:[A-Za-z0-9._~:/@%+*#-]{1,250})$")
+
 _LOCAL_GRAMMAR: dict[str, "re.Pattern[str] | None"] = {
     "reload-options": None,
+    # A sip:/tel: link was opened: fill the panel's dial field. Never dials.
+    "prefill": PREFILL_TARGET,
 }
 
 
@@ -1910,6 +1926,7 @@ def cmd_uninstall(_args) -> int:
     except OSError:
         pass
     systemctl("daemon-reload")
+    remove_handler()
     print(f"omarchy-sip: unit removed (config in {CONF_DIR} kept)")
     return 0
 
@@ -2052,6 +2069,100 @@ def cmd_contacts(args) -> int:
         die(f"no contact for {uri}")
     write_private(CONTACTS, "".join(contact_line(c) + "\n" for c in kept), fd)
     print(json.dumps(kept, separators=(",", ":")))
+    return 0
+
+
+def link_target(url: str) -> str:
+    """What a sip:, sips: or tel: link should put in the dial field, or "".
+
+    tel: is a phone number with visual separators (RFC 3966 allows - . ( ))
+    and parameters such as ;phone-context; sip: may carry URI parameters and
+    headers. The number or bare address is kept, the rest dropped, and the
+    result must pass PREFILL_TARGET -- a link is text from anywhere.
+    """
+    value = urllib.parse.unquote(str(url or "").strip())
+    if len(value) > 512:
+        return ""
+    scheme, sep, rest = value.partition(":")
+    scheme = scheme.lower()
+    if not sep or scheme not in HANDLER_SCHEMES:
+        return ""
+    if scheme == "tel":
+        number = re.sub(r"[\s().-]", "", rest.split(";", 1)[0])
+        return number if PREFILL_TARGET.match(number) else ""
+    uri = peer_uri(f"{scheme}:{rest.lstrip('/')}")
+    return uri if PREFILL_TARGET.match(uri) else ""
+
+
+def cmd_open(args) -> int:
+    target = link_target(args.url)
+    if not target:
+        die(f"not a sip:, sips: or tel: link this can dial: {args.url[:80]!r}")
+    if not daemon_up():
+        die("the SIP daemon is not running -- start it from the panel first")
+    # A round trip rather than fire-and-forget, so a daemon too old to know
+    # `prefill` says so instead of the link silently doing nothing.
+    reply = request("prefill", target, timeout=3)
+    if not reply or not reply.get("ok"):
+        die("the daemon did not accept the link -- restart it: omarchy-sip restart")
+    return 0
+
+
+def apps_fd() -> int:
+    """~/.local/share/applications: pinned, never re-moded -- it is not ours."""
+    return dir_fd_for(APPS_DIR, 0o755, owned=False)
+
+
+def handler_text() -> str:
+    # Absolute, isolated interpreter, like the unit. Exec is unescaped twice
+    # (key-file backslashes, then exec quoting) and `%` is a field code, so a
+    # path carrying any of those is refused rather than escaped twice over.
+    for path in (PYTHON, SELF):
+        if re.search(r'["\\$`%\n]', path):
+            die(f"cannot write a desktop entry for this path: {path!r}")
+
+    def quote(arg: str) -> str:
+        return f'"{arg}"'
+    return (
+        "[Desktop Entry]\n"
+        "Type=Application\n"
+        "Name=Simple SIP\n"
+        "Comment=Open sip: and tel: links in the Simple SIP panel\n"
+        f"Exec={quote(PYTHON)} -I {quote(SELF)} open %u\n"
+        "MimeType=" + "".join(f"x-scheme-handler/{s};" for s in HANDLER_SCHEMES) + "\n"
+        "NoDisplay=true\n"
+        "Terminal=false\n"
+    )
+
+
+def xdg_mime(*args: str) -> int:
+    if XDG_MIME is None:
+        return -1
+    try:
+        return subprocess.run([XDG_MIME, *args], env=child_env(), timeout=15,
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
+    except subprocess.TimeoutExpired:
+        return -1
+
+
+def remove_handler() -> bool:
+    try:
+        os.unlink(HANDLER, dir_fd=apps_fd())
+        return True
+    except OSError:
+        return False
+
+
+def cmd_handler(args) -> int:
+    if args.action == "install":
+        write_file(HANDLER, handler_text(), apps_fd(), 0o644)
+        mimes = [f"x-scheme-handler/{s}" for s in HANDLER_SCHEMES]
+        if xdg_mime("default", HANDLER, *mimes) != 0:
+            die("wrote the handler, but xdg-mime could not make it the default")
+        print(f"omarchy-sip: {', '.join(s + ':' for s in HANDLER_SCHEMES)} links now open the panel")
+    else:
+        removed = remove_handler()
+        print("omarchy-sip: link handler removed" if removed else "omarchy-sip: no link handler installed")
     return 0
 
 
@@ -2280,6 +2391,14 @@ def main(argv: list[str]) -> int:
     p.add_argument("uri", nargs="?")
     p.add_argument("--name")
     p.set_defaults(func=cmd_contacts)
+
+    p = sub.add_parser("open", help="put a sip:/sips:/tel: link in the panel's dial field")
+    p.add_argument("url")
+    p.set_defaults(func=cmd_open)
+
+    p = sub.add_parser("handler", help="make sip:/sips:/tel: links open the panel, or stop")
+    p.add_argument("action", choices=["install", "uninstall"])
+    p.set_defaults(func=cmd_handler)
 
     p = sub.add_parser("option", help="show or set the daemon's own options")
     p.add_argument("action", choices=["show", "set"], nargs="?", default="show")

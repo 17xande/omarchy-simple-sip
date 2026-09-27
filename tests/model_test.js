@@ -165,6 +165,9 @@ t("matchContacts by number prefix", M.matchContacts("100", BOOK, 5).map(c => c.n
 t("matchContacts name start before contains", M.matchContacts("desk", BOOK, 5).map(c => c.name), ["Desk two", "Front desk"]);
 t("matchContacts limit", M.matchContacts("1", BOOK, 1).length, 1);
 t("matchContacts empty query", M.matchContacts(" ", BOOK, 5), []);
+t("classify prefill number", M.classifyEvent({ type: "PREFILL", target: "+15550100" }), { kind: "prefill", target: "+15550100" });
+t("classify prefill address", M.classifyEvent({ type: "PREFILL", target: "sip:a@b" }), { kind: "prefill", target: "sip:a@b" });
+t("classify prefill refuses junk", M.classifyEvent({ type: "PREFILL", target: "sip:a@b;x" }), null);
 t("duration 95s", M.durationText(1000, 1000 + 95000), "01:35");
 t("duration hours", M.durationText(1, 1 + 3725000), "1:02:05");
 t("duration unset", M.durationText(0, 5000), "");
