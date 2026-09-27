@@ -38,10 +38,23 @@ Panel {
   property bool setupTouched: false
   property bool keypadOpen: false
   property bool transferOpen: false
+  // The address being saved as a contact, or "" when the form is closed.
+  property string contactUri: ""
 
-  // A text field owns the keyboard whenever one is on screen, so letter
-  // shortcuts (a / d / b) only apply in the states that have no input.
-  readonly property bool textInputActive: dialRow.visible || setupForm.visible || transferRow.visible
+  readonly property var suggestions: dialRow.visible
+    ? Model.matchContacts(dialText, sip.contacts, 5) : []
+
+  // Whether any text field on screen is on screen at all (for handing the
+  // keyboard back when the last one goes), and whether one has the keyboard
+  // now (for keeping navigation and shortcuts out of the way of typing).
+  // They differ after Down from the dial field: it stays on screen while the
+  // cursor walks the rows under it.
+  readonly property bool textInputActive: dialRow.visible || setupForm.visible
+                                          || transferRow.visible || contactRow.visible
+  readonly property bool fieldFocused: dialField.activeFocus || transferField.activeFocus
+                                       || contactField.activeFocus || uriField.activeFocus
+                                       || authField.activeFocus || displayField.activeFocus
+                                       || passwordField.activeFocus || transportField.popupOpen
 
   // ...and when the last one leaves the screen, the keyboard has to come back.
   // Nothing else claims it: dialField takes focus when it appears and no one
@@ -52,8 +65,18 @@ Panel {
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
+  // The contact form closing strands focus on a hidden field just as the
+  // others do, but the dial field may still be on screen to take it.
+  onContactUriChanged: if (contactUri === "" && opened) {
+    Qt.callLater(function() {
+      if (dialField.visible) dialField.forceActiveFocus()
+      else keyCatcher.forceActiveFocus()
+    })
+  }
+
   readonly property var actions: buildActions()
-  readonly property var primaryActions: actions.filter(function(a) { return a.section !== "history" })
+  readonly property var suggestActions: actions.filter(function(a) { return a.section === "suggest" })
+  readonly property var primaryActions: actions.filter(function(a) { return a.section === "primary" })
   readonly property var historyActions: actions.filter(function(a) { return a.section === "history" })
 
   // Cursor indices are assigned here, once, so the two Repeaters below can
@@ -94,6 +117,12 @@ Panel {
       return inCall
     }
     var rows = []
+    // Contacts matching what is typed, first, right under the field.
+    for (var k = 0; k < suggestions.length; k++) {
+      rows.push({ id: "call:" + suggestions[k].uri, label: suggestions[k].name || Model.peerShort(suggestions[k].uri),
+                  meta: Model.peerLabel(suggestions[k].uri), glyph: "\uf095",
+                  contactUri: suggestions[k].uri, section: "suggest" })
+    }
     if (sip.voicemailTarget !== "") {
       rows.push({ id: "voicemail", label: "Voicemail", glyph: "\uf0e0", hint: "v",
                   meta: sip.mwi.newCount > 0 ? sip.mwi.newCount + " new" : "",
@@ -106,7 +135,8 @@ Panel {
       var entry = sip.history[i]
       rows.push({
         id: "redial:" + Model.redialTarget(entry),
-        label: Model.historyLabel(entry),
+        label: Model.historyLabel(entry, sip.contacts),
+        contactUri: Model.redialTarget(entry),
         glyph: Model.historyGlyph(entry),
         meta: Model.historyMeta(entry, clock.now),
         urgent: Model.historyIsMissed(entry),
@@ -130,7 +160,27 @@ Panel {
     case "voicemail": sip.dial(sip.voicemailTarget); break
     default:
       if (id.indexOf("redial:") === 0 && id.length > 7) sip.dial(id.substring(7))
+      else if (id.indexOf("call:") === 0 && id.length > 5) { dialText = ""; sip.dial(id.substring(5)) }
     }
+  }
+
+  // "Save as contact" for a row's address; an existing contact is renamed,
+  // and saving an empty name removes it.
+  function openContact(uri) {
+    if (!uri) return
+    contactUri = uri
+    contactField.text = Model.contactName(uri, sip.contacts)
+    Qt.callLater(function() { contactField.forceActiveFocus(); contactField.selectAll() })
+  }
+
+  function saveContact() {
+    if (contactUri === "") return
+    if (sip.saveContact(contactUri, contactField.text)) contactUri = ""
+  }
+
+  function cursorAction() {
+    if (!cursorActive || actions.length === 0) return null
+    return actions[Math.min(cursorIndex, actions.length - 1)]
   }
 
   function moveCursor(dy) {
@@ -194,6 +244,7 @@ Panel {
         root.keypadOpen = false
         root.transferOpen = false
       }
+      if (sip.callState !== "idle") root.contactUri = ""
     }
   }
 
@@ -202,9 +253,14 @@ Panel {
     if (sip.transfer(transferField.text) === "") transferOpen = false
   }
 
+  // Typing a name and pressing Enter calls the best match; anything that
+  // looks like an address or a number is dialled as typed.
   function placeCall() {
-    if (dialText.trim() === "") return
-    sip.dial(dialText)
+    var text = dialText.trim()
+    if (text === "") return
+    var byName = suggestions.length > 0 && /[A-Za-z]/.test(text)
+                 && text.indexOf("@") < 0 && !/^(sips?|tel):/i.test(text)
+    sip.dial(byName ? suggestions[0].uri : text)
     dialText = ""
   }
 
@@ -328,12 +384,18 @@ Panel {
     PanelKeyCatcher {
       id: keyCatcher
       anchors.fill: parent
-      // Freeze cursor navigation while a text field is on screen so typing an
-      // extension does not trigger shortcuts.
-      blocked: root.textInputActive
+      // Freeze cursor navigation while a text field has the keyboard, so
+      // typing an extension does not trigger shortcuts.
+      blocked: root.fieldFocused
 
       onMoveRequested: function(dx, dy) {
         if (!root.cursorActive) { root.cursorActive = true; return }
+        // Up from the first row goes back to the dial field it came from.
+        if (dy < 0 && root.cursorIndex === 0 && dialRow.visible) {
+          root.cursorActive = false
+          dialField.forceActiveFocus()
+          return
+        }
         if (dy !== 0) root.moveCursor(dy)
       }
       onActivateRequested: {
@@ -357,6 +419,15 @@ Panel {
         else if (sip.callState === "active" && Model.validDigits(t)) sip.sendDigits(t)
         else if (key === "s") root.setupOpen = !root.setupOpen
         else if (key === "v" && sip.callState === "idle" && sip.voicemailTarget !== "") sip.dial(sip.voicemailTarget)
+        else if (key === "c" && root.cursorAction() && root.cursorAction().contactUri)
+          root.openContact(root.cursorAction().contactUri)
+        // Anything dialable typed while the cursor is on the rows goes back
+        // into the dial field, as if it had never left.
+        else if (dialRow.visible && /^[0-9+*#]$/.test(t)) {
+          root.dialText = root.dialText + t
+          root.cursorActive = false
+          dialField.forceActiveFocus()
+        }
       }
 
       Flickable {
@@ -428,7 +499,7 @@ Panel {
             Text {
               textFormat: Text.PlainText
               width: parent.width
-              text: Model.peerShort(sip.peer) || "unknown"
+              text: Model.contactName(sip.peer, sip.contacts) || Model.peerShort(sip.peer) || "unknown"
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.heading
@@ -441,8 +512,8 @@ Panel {
               visible: text !== ""
               text: {
                 var full = Model.peerLabel(sip.peer)
-                var short = Model.peerShort(sip.peer)
-                return full !== short ? full : ""
+                var big = Model.contactName(sip.peer, sip.contacts) || Model.peerShort(sip.peer)
+                return full !== big ? full : ""
               }
               color: root.dim
               font.family: root.fontFamily
@@ -549,6 +620,12 @@ Panel {
 
               onTextChanged: if (text !== root.dialText) root.dialText = text
               onAccepted: root.placeCall()
+              Keys.onDownPressed: {
+                if (root.actions.length === 0) return
+                root.cursorIndex = 0
+                root.cursorActive = true
+                keyCatcher.forceActiveFocus()
+              }
               Keys.onEscapePressed: root.close()
               onVisibleChanged: if (visible) Qt.callLater(forceActiveFocus)
             }
@@ -561,6 +638,23 @@ Panel {
               enabled: root.dialText.trim() !== "" && !sip.busy
               Layout.alignment: Qt.AlignVCenter
               onClicked: root.placeCall()
+            }
+          }
+
+          // ---------- contact suggestions ----------
+          Column {
+            id: suggestColumn
+            visible: root.suggestActions.length > 0
+            width: parent.width
+            spacing: Style.space(6)
+
+            Repeater {
+              model: root.suggestActions
+              ActionRow {
+                required property var modelData
+                width: suggestColumn.width
+                action: modelData
+              }
             }
           }
 
@@ -601,6 +695,51 @@ Panel {
                 required property var modelData
                 width: historyColumn.width
                 action: modelData
+              }
+            }
+          }
+
+          // ---------- save as contact ----------
+          Column {
+            id: contactRow
+            visible: root.contactUri !== "" && sip.callState === "idle"
+            width: parent.width
+            spacing: Style.space(6)
+
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              text: "Save " + Model.peerLabel(root.contactUri) + " as"
+                    + (Model.contactName(root.contactUri, sip.contacts) !== "" ? " (empty removes it)" : "")
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideMiddle
+            }
+
+            RowLayout {
+              width: parent.width
+              spacing: Style.space(6)
+
+              TextField {
+                id: contactField
+                Layout.fillWidth: true
+                placeholderText: "Name"
+                foreground: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+                maximumLength: 128
+                onAccepted: root.saveContact()
+                Keys.onEscapePressed: root.contactUri = ""
+              }
+
+              PanelActionButton {
+                iconText: "\uf234"
+                tooltipText: "Save contact"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                Layout.alignment: Qt.AlignVCenter
+                onClicked: root.saveContact()
               }
             }
           }
@@ -757,11 +896,19 @@ Panel {
       anchors.fill: parent
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
+      acceptedButtons: Qt.LeftButton | Qt.RightButton
       onEntered: {
         root.cursorActive = true
         root.cursorIndex = actionRow.rowIndex
       }
-      onClicked: root.activate(actionRow.action.id)
+      // Right-click on a call or contact row saves (or renames) the contact.
+      onClicked: function(mouse) {
+        if (mouse.button === Qt.RightButton) {
+          if (actionRow.action.contactUri) root.openContact(actionRow.action.contactUri)
+          return
+        }
+        root.activate(actionRow.action.id)
+      }
     }
 
     RowLayout {

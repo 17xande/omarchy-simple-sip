@@ -941,6 +941,72 @@ def journal(obj: dict) -> None:
 
 HISTORY_LIMIT = 50
 
+MAX_CONTACTS = 200
+MAX_CONTACT_NAME = 128
+CONTACT_URI = re.compile(r"^sips?:[A-Za-z0-9._~:/@%+*#-]{1,250}$")   # the dial grammar
+
+
+def sip_address(text: str) -> str:
+    """peer_uri(), but only for an address that really is sip: or sips: --
+    peer_uri() assumes sip: for anything scheme-less, which is right for a
+    caller ID and wrong for something a person saved as `tel:` or `http:`."""
+    value = str(text or "").strip()
+    if "<" in value:
+        value = value.split("<", 1)[1]
+    if not re.match(r"^\s*sips?:", value, re.IGNORECASE):
+        return ""
+    uri = peer_uri(value)
+    return uri if CONTACT_URI.match(uri) else ""
+
+
+def parse_contacts(text: str) -> list[dict]:
+    """baresip's contacts file -- `"Name" <sip:uri>;params`, one per line --
+    as [{name, uri}]. Bounded: at most MAX_CONTACTS entries, names clipped,
+    and a URI that would not pass the dial grammar is skipped, since the
+    panel dials what it finds here."""
+    out: list[dict] = []
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        name = ""
+        if line.startswith('"'):
+            end = line.find('"', 1)
+            if end < 0:
+                continue
+            name, line = line[1:end], line[end + 1 :].strip()
+        uri = sip_address(line)
+        if not uri:
+            continue
+        out.append({"name": clip(name, MAX_CONTACT_NAME), "uri": uri})
+        if len(out) >= MAX_CONTACTS:
+            break
+    return out
+
+
+def read_contacts(dir_fd: int | None = None) -> list[dict]:
+    return parse_contacts(read_bounded(CONTACTS, conf_fd() if dir_fd is None else dir_fd, MAX_FILE))
+
+
+def contact_name_for(uri: str, contacts: list[dict]) -> str:
+    """The saved name for a peer, matched on the bare address; mirrors
+    Model.contactName(). Falls back to the user part alone when exactly one
+    contact has it, so an extension saved against the PBX's name still
+    matches a call that arrives from its IP."""
+    target = peer_uri(uri)
+    if not target:
+        return ""
+    for c in contacts:
+        if c["uri"].partition(":")[2] == target.partition(":")[2]:
+            return c["name"]
+    user = target.partition(":")[2].split("@", 1)[0]
+    matches = [c for c in contacts if c["uri"].partition(":")[2].split("@", 1)[0] == user]
+    return matches[0]["name"] if len(matches) == 1 and len(user) >= 3 else ""
+
+
+def contact_line(contact: dict) -> str:
+    return f'"{contact["name"]}" <{contact["uri"]}>' if contact["name"] else f'<{contact["uri"]}>'
+
 
 def peer_uri(uri: str) -> str:
     """The bare address of a peer: display name, angle brackets and URI
@@ -1317,8 +1383,10 @@ class CallAlerts:
     once and withdrawn when it recovers.
     """
 
-    def __init__(self, notifier, options, invoke, clock=time.monotonic, show=None) -> None:
+    def __init__(self, notifier, options, invoke, clock=time.monotonic, show=None,
+                 contacts=None) -> None:
         self.notifier = notifier
+        self.contacts = contacts or (lambda: [])   # callable -> [{name, uri}]
         self.options = options          # callable -> current options dict
         self.invoke = invoke            # callable(line) -> None
         self.show = show or (lambda: None)   # ask the panel to open
@@ -1330,9 +1398,15 @@ class CallAlerts:
         self.reg_error = ""
         self.reg_alerted = False
 
-    @staticmethod
-    def caller(event: dict) -> str:
-        return peer_uri(event.get("peeruri") or "").partition(":")[2] or "unknown caller"
+    def caller(self, event: dict) -> str:
+        address = peer_uri(event.get("peeruri") or "").partition(":")[2]
+        try:
+            name = contact_name_for(event.get("peeruri") or "", self.contacts())
+        except OSError:
+            name = ""
+        if name and address:
+            return f"{name} ({address})"
+        return name or address or "unknown caller"
 
     def handle(self, event: dict) -> None:
         etype = event.get("type")
@@ -1523,6 +1597,7 @@ def cmd_daemon(_args) -> int:
     alerts = CallAlerts(
         notifier, lambda: options, lambda line: bus.invoke(line, "notify"),
         show=lambda: hub.broadcast(json.dumps({"type": "SHOW_PANEL"}, separators=(",", ":"))),
+        contacts=read_contacts,   # re-read per call: small, bounded, and edited while we run
     )
     sel = selectors.DefaultSelector()
     sel.register(bus.fileno(), selectors.EVENT_READ, "bus")
@@ -1943,6 +2018,43 @@ def unseen_missed(seen: float) -> int:
     return count
 
 
+def contact_name_field(value: str) -> str:
+    """A name serialised into baresip's contacts grammar, where a `"` would
+    end the quoted name and `<`/`>` would start a second address. None of
+    them belongs in a name, so they are refused rather than escaped."""
+    value = " ".join(str(value or "").split())
+    if len(value) > MAX_CONTACT_NAME:
+        die(f"contact name is too long (max {MAX_CONTACT_NAME} characters)")
+    for ch in ('"', "<", ">", ";", "\\"):
+        if ch in value:
+            die(f"contact name cannot contain {ch!r}")
+    return value
+
+
+def cmd_contacts(args) -> int:
+    fd = conf_fd()
+    contacts = read_contacts(fd)
+    if args.action == "list":
+        print(json.dumps(contacts, separators=(",", ":")))
+        return 0
+    uri = sip_address(args.uri or "")
+    if not uri:
+        die("contacts needs a sip: address, e.g. sip:1001@pbx.example.com")
+    kept = [c for c in contacts if c["uri"] != uri]
+    if args.action == "add":
+        name = contact_name_field(args.name or "")
+        if not name:
+            die("contacts add needs --name")
+        if len(kept) >= MAX_CONTACTS:
+            die(f"at most {MAX_CONTACTS} contacts")
+        kept.append({"name": name, "uri": uri})
+    elif len(kept) == len(contacts):
+        die(f"no contact for {uri}")
+    write_private(CONTACTS, "".join(contact_line(c) + "\n" for c in kept), fd)
+    print(json.dumps(kept, separators=(",", ":")))
+    return 0
+
+
 def cmd_history(args) -> int:
     if args.mark_seen:
         write_private(SEEN, f"{time.time():.3f}\n", conf_fd())
@@ -2162,6 +2274,12 @@ def main(argv: list[str]) -> int:
     p.add_argument("--mark-seen", action="store_true",
                    help="record that the log has been looked at (clears the missed-call count)")
     p.set_defaults(func=cmd_history)
+
+    p = sub.add_parser("contacts", help="list, add or remove contacts")
+    p.add_argument("action", choices=["list", "add", "remove"], nargs="?", default="list")
+    p.add_argument("uri", nargs="?")
+    p.add_argument("--name")
+    p.set_defaults(func=cmd_contacts)
 
     p = sub.add_parser("option", help="show or set the daemon's own options")
     p.add_argument("action", choices=["show", "set"], nargs="?", default="show")

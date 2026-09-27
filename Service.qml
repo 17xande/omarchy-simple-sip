@@ -107,6 +107,9 @@ Item {
   property var history: []
   // Missed calls logged since the panel was last opened, over the whole log.
   property int unseenMissed: 0
+  // Saved contacts, [{name, uri}], as `omarchy-sip contacts` lists them.
+  property var contacts: []
+
   // The last voicemail summary the server sent (see Model.parseMwi).
   property var mwi: ({ waiting: false, newCount: 0, oldCount: 0, account: "" })
   property bool markSeenPending: false
@@ -386,6 +389,27 @@ Item {
   }
 
   function startDaemon() { run(["start"]) }
+
+  function loadContacts() { return runContacts([cli, "contacts"]) }
+
+  // An empty name removes the contact. Both answer with the new list, so the
+  // panel never shows a contact the CLI refused to store.
+  function saveContact(uri, name) {
+    var target = Model.redialTarget({ peer: uri })
+    if (target === "") return false
+    var n = String(name || "").trim()
+    return runContacts(n === "" ? [cli, "contacts", "remove", target]
+                                : [cli, "contacts", "add", target, "--name", n])
+  }
+
+  function runContacts(args) {
+    if (contactsProcess.running) return false
+    contactsProcess.errText = ""
+    contactsProcess.command = args
+    contactsProcess.running = true
+    contactsWatchdog.restart()
+    return true
+  }
 
   function loadAccount() {
     if (accountShowProcess.running) return
@@ -744,6 +768,40 @@ Item {
     }
   }
 
+  // The contact list is a whole document, so StdioCollector -- bounded by the
+  // CLI's own caps (200 entries, clipped names) and by maxJsonChars here.
+  Process {
+    id: contactsProcess
+    property string errText: ""
+    running: false
+    command: []
+    clearEnvironment: true
+    environment: root.cleanEnv()
+    stdout: StdioCollector { id: contactsOut; waitForEnd: true }
+    stderr: SplitParser {
+      onRead: function(line) { contactsProcess.errText = root.appendBounded(contactsProcess.errText, line) }
+    }
+    onExited: function(exitCode) {
+      contactsWatchdog.stop()
+      if (exitCode !== 0) {
+        root.lastError = root.elide(contactsProcess.errText || "Could not save the contact")
+        return
+      }
+      var raw = String(contactsOut.text || "[]")
+      if (raw.length > root.maxJsonChars) return
+      try {
+        var parsed = JSON.parse(raw)
+        if (Array.isArray(parsed)) root.contacts = parsed
+      } catch (e) {}
+    }
+  }
+
+  Timer {
+    id: contactsWatchdog
+    interval: 10000
+    onTriggered: if (contactsProcess.running) contactsProcess.running = false
+  }
+
   Process {
     id: accountShowProcess
     running: false
@@ -836,5 +894,6 @@ Item {
     startEvents()
     refresh()
     loadAccount()
+    loadContacts()
   }
 }

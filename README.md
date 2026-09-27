@@ -116,6 +116,23 @@ the shell is restarting is still recorded. It lives in
 `~/.config/omarchy-sip/history.jsonl` (mode `0600`, last 50 calls), and
 `historyLimit: 0` in the widget settings hides the section entirely.
 
+### Contacts
+
+Save a number from Recent calls with right-click, or move the cursor onto the row
+and press `c`; saving an empty name removes the contact. Saved names replace
+numbers in the call screen, Recent calls and the incoming-call notification.
+Typing in the dial field lists matching contacts under it — Down moves onto them,
+and Enter on a typed name calls the best match. From a terminal:
+
+```bash
+omarchy-sip contacts                                  # list, as JSON
+omarchy-sip contacts add sip:1001@pbx.example.com --name "Front desk"
+omarchy-sip contacts remove sip:1001@pbx.example.com
+```
+
+They are stored in baresip's own format in `~/.config/omarchy-sip/contacts`
+(`0600`), at most 200.
+
 ### Keybindings
 
 Omarchy plugins cannot ship keybindings — the manifest has no such field, and

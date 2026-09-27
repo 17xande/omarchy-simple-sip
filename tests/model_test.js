@@ -3,7 +3,7 @@
 const fs = require("fs");
 const src = fs.readFileSync(require("path").join(__dirname, "..", "Model.js"), "utf8");
 const M = {};
-new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,parseMwi,validDigits,queueDigits,optionChanges,pickOptions,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,accountUri,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,callTitle,domainOf,historyGlyph,parseHistory,redialTarget,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
+new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,parseMwi,validDigits,queueDigits,optionChanges,pickOptions,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,accountUri,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,callTitle,domainOf,historyGlyph,parseHistory,contactName,matchContacts,redialTarget,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
 
 let fails = 0;
 const ESC = String.fromCharCode(27);
@@ -147,6 +147,24 @@ t("hero with voicemail", M.heroMeta({ daemonUp: true, configured: true, registra
   "sip:a@x \u00b7 2 new voicemails");
 t("hero with one voicemail", M.heroMeta({ daemonUp: true, configured: true, registration: "registered", aor: "sip:a@x", newVoicemail: 1 }),
   "sip:a@x \u00b7 1 new voicemail");
+const BOOK = [
+  { name: "Front desk", uri: "sip:1001@pbx.example.com" },
+  { name: "Mum", uri: "sip:+15550100@gw.example.com" },
+  { name: "Desk two", uri: "sip:1002@pbx.example.com" },
+];
+t("contactName by address", M.contactName("sip:1001@pbx.example.com;user=phone", BOOK), "Front desk");
+t("contactName display-name form", M.contactName('"x" <sip:+15550100@gw.example.com>', BOOK), "Mum");
+t("contactName by unique user part", M.contactName("sip:1001@10.0.0.5", BOOK), "Front desk");
+t("contactName not for a short user part", M.contactName("sip:10@x", [{ name: "N", uri: "sip:10@y" }]), "");
+t("contactName not when ambiguous", M.contactName("sip:1001@z", BOOK.concat([{ name: "O", uri: "sip:1001@q" }])), "");
+t("contactName unknown", M.contactName("sip:9@x", BOOK), "");
+t("contactName no book", M.contactName("sip:1001@pbx.example.com", undefined), "");
+t("hist label uses contact", M.historyLabel({ peer: "sip:1001@pbx.example.com" }, BOOK), "Front desk");
+t("matchContacts by name prefix", M.matchContacts("mu", BOOK, 5).map(c => c.name), ["Mum"]);
+t("matchContacts by number prefix", M.matchContacts("100", BOOK, 5).map(c => c.name), ["Front desk", "Desk two"]);
+t("matchContacts name start before contains", M.matchContacts("desk", BOOK, 5).map(c => c.name), ["Desk two", "Front desk"]);
+t("matchContacts limit", M.matchContacts("1", BOOK, 1).length, 1);
+t("matchContacts empty query", M.matchContacts(" ", BOOK, 5), []);
 t("duration 95s", M.durationText(1000, 1000 + 95000), "01:35");
 t("duration hours", M.durationText(1, 1 + 3725000), "1:02:05");
 t("duration unset", M.durationText(0, 5000), "");

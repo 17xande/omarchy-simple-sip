@@ -356,8 +356,50 @@ function redialTarget(entry) {
   return (/^\s*(?:[^<]*<)?sips:/.test(peer) ? "sips:" : "sip:") + label
 }
 
-function historyLabel(entry) {
-  return peerShort((entry && entry.peer) || "") || "unknown"
+function historyLabel(entry, contacts) {
+  var peer = (entry && entry.peer) || ""
+  return contactName(peer, contacts) || peerShort(peer) || "unknown"
+}
+
+// ---------------------------------------------------------------- contacts
+
+// The saved name for a peer, matched on the bare address. Falls back to the
+// user part alone when exactly one contact has it (and it is not a two-digit
+// code), so an extension saved against the PBX's hostname still matches a
+// call that arrives from its IP. Mirrors contact_name_for() in the CLI.
+function contactName(uri, contacts) {
+  var label = peerLabel(uri)
+  var list = contacts || []
+  if (label === "") return ""
+  for (var i = 0; i < list.length; i++) {
+    if (peerLabel(list[i].uri) === label) return String(list[i].name || "")
+  }
+  var user = label.split("@")[0]
+  if (user.length < 3) return ""
+  var found = ""
+  var count = 0
+  for (var j = 0; j < list.length; j++) {
+    if (peerLabel(list[j].uri).split("@")[0] === user) { found = String(list[j].name || ""); count++ }
+  }
+  return count === 1 ? found : ""
+}
+
+// Contacts matching what is typed in the dial field: a name containing it
+// (any word, case-insensitive) or an address whose user part starts with it.
+// Names that start with it sort first.
+function matchContacts(query, contacts, limit) {
+  var q = String(query || "").trim().toLowerCase()
+  var list = contacts || []
+  if (q === "") return []
+  var starts = [], contains = []
+  for (var i = 0; i < list.length; i++) {
+    var c = list[i]
+    var name = String(c.name || "").toLowerCase()
+    var user = peerShort(c.uri).toLowerCase()
+    if (name.indexOf(q) === 0 || user.indexOf(q) === 0) starts.push(c)
+    else if (name.indexOf(q) > 0) contains.push(c)
+  }
+  return starts.concat(contains).slice(0, limit || 5)
 }
 
 // "3m ago · 01:12" / "just now · Missed" / "2d ago · No answer"

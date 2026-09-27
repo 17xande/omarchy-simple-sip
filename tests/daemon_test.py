@@ -6,7 +6,7 @@ all three here.
 
 Run: python3 tests/daemon_test.py
 """
-import importlib.machinery, importlib.util, os, sys
+import importlib.machinery, importlib.util, json, os, subprocess, sys, tempfile
 
 spec = importlib.util.spec_from_loader(
     "omarchy_sip",
@@ -144,6 +144,65 @@ clock.now += 120
 alerts.tick()
 check("with registration alerts off nothing is sent", n.sent == [])
 
+
+# ----------------------------------------------------------------- contacts
+
+parsed = mod.parse_contacts(
+    '# comment\n"Front desk" <sip:1001@pbx.example.com>;presence=p2p\n'
+    '<sip:1002@pbx.example.com>\n"Bad" <sip:a@b;x>\n"Evil" <http://x>\n\n'
+)
+check("contacts parse name and bare address",
+      parsed[:2] == [{"name": "Front desk", "uri": "sip:1001@pbx.example.com"},
+                     {"name": "", "uri": "sip:1002@pbx.example.com"}])
+check("a URI parameter is dropped, not kept", parsed[2] == {"name": "Bad", "uri": "sip:a@b"})
+check("a non-sip address is skipped", len(parsed) == 3)
+check("contacts are capped",
+      len(mod.parse_contacts("".join(f"<sip:{i}@x>\n" for i in range(500)))) == mod.MAX_CONTACTS)
+check("a long name is clipped",
+      len(mod.parse_contacts('"' + "n" * 1000 + '" <sip:a@b>')[0]["name"]) <= mod.MAX_CONTACT_NAME)
+
+book = [{"name": "Front desk", "uri": "sip:1001@pbx.example.com"},
+        {"name": "Mum", "uri": "sip:+15550100@gw.example.com"}]
+check("a name is found by address", mod.contact_name_for("sip:1001@pbx.example.com;user=phone", book) == "Front desk")
+check("...or by user part alone when unambiguous", mod.contact_name_for("sip:1001@10.0.0.5", book) == "Front desk")
+check("...but not for a short one", mod.contact_name_for("sip:12@x", [{"name": "N", "uri": "sip:12@y"}]) == "")
+check("...nor an ambiguous one",
+      mod.contact_name_for("sip:1001@z", book + [{"name": "Other", "uri": "sip:1001@elsewhere"}]) == "")
+check("an unknown caller has no name", mod.contact_name_for("sip:9999@pbx", book) == "")
+
+alerts, n, _, _, _ = make()
+alerts.contacts = lambda: [{"name": "<i>Mum</i>", "uri": "sip:+15550100@gw.example.com"}]
+alerts.handle({"type": "CALL_INCOMING", "id": "k", "peeruri": "sip:+15550100@gw.example.com"})
+check("the notification names a known caller, escaped",
+      n.sent[0][2] == "&lt;i&gt;Mum&lt;/i&gt; (+15550100@gw.example.com)")
+
+ctmp = tempfile.mkdtemp()
+cdir = os.path.join(ctmp, "c")
+os.mkdir(cdir, 0o700)
+CLI = os.path.join(os.path.dirname(__file__), "..", "bin", "omarchy-sip")
+
+
+def contacts(*args):
+    env = {"HOME": ctmp, "PATH": "/usr/bin:/bin", "OMARCHY_SIP_CONF": cdir, "XDG_RUNTIME_DIR": ctmp}
+    return subprocess.run([sys.executable, "-I", CLI, "contacts", *args], env=env,
+                          capture_output=True, timeout=20)
+
+
+r = contacts("add", "sip:1001@pbx", "--name", "Front desk")
+check("contacts add stores a contact", r.returncode == 0
+      and json.loads(contacts().stdout) == [{"name": "Front desk", "uri": "sip:1001@pbx"}])
+contacts("add", "sip:1001@pbx;user=phone", "--name", "Reception")
+check("adding the same address renames rather than duplicates",
+      json.loads(contacts().stdout) == [{"name": "Reception", "uri": "sip:1001@pbx"}])
+for bad in ('Bob" <sip:evil@x>', "a<b", "a;b"):
+    r = contacts("add", "sip:2002@pbx", "--name", bad)
+    check(f"a name with {bad!r} is refused", r.returncode != 0)
+check("...and nothing was written", len(json.loads(contacts().stdout)) == 1)
+check("a non-sip address is refused", contacts("add", "tel:123", "--name", "x").returncode != 0)
+r = contacts("remove", "sip:1001@pbx")
+check("contacts remove deletes it", r.returncode == 0 and json.loads(contacts().stdout) == [])
+check("removing an unknown contact says so", contacts("remove", "sip:1001@pbx").returncode != 0)
+check("the contacts file is private", oct(os.stat(os.path.join(cdir, "contacts")).st_mode & 0o777) == "0o600")
 
 print("\nall passed" if not fails else f"\n{fails} FAILED")
 sys.exit(1 if fails else 0)
