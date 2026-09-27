@@ -105,6 +105,9 @@ Item {
   property double dialSentAt: 0
   // Recent calls, newest first, as recorded by the daemon.
   property var history: []
+  // Missed calls logged since the panel was last opened, over the whole log.
+  property int unseenMissed: 0
+  property bool markSeenPending: false
   // The stored account as `account show` reports it -- everything the setup
   // form edits except the password, of which only hasPassword is known.
   property var accountDetails: ({})
@@ -172,11 +175,23 @@ Item {
     statusWatchdog.restart()
   }
 
+  // Runs even with historyLimit 0: the list may be hidden, but the missed-call
+  // count still drives the bar badge.
   function refreshHistory() {
-    if (historyProcess.running || historyLimit === 0) return
-    historyProcess.command = [cli, "history", "--limit", String(historyLimit)]
+    if (historyProcess.running) return
+    var args = [cli, "history", "--limit", String(historyLimit)]
+    if (markSeenPending) args.push("--mark-seen")
+    markSeenPending = false
+    historyProcess.command = args
     historyProcess.running = true
     historyWatchdog.restart()
+  }
+
+  // Opening the panel is looking at the log.
+  function markHistorySeen() {
+    markSeenPending = true
+    if (historyProcess.running) return   // picked up by the next refresh
+    refreshHistory()
   }
 
   // Commands run one CLI process at a time, in order. One that arrives while
@@ -618,11 +633,13 @@ Item {
       var raw = String(historyOut.text || "[]")
       if (raw.length > root.maxJsonChars) return
       try {
-        var parsed = JSON.parse(raw)
-        root.history = Array.isArray(parsed) ? parsed : []
+        var parsed = Model.parseHistory(JSON.parse(raw))
+        root.history = parsed.calls
+        root.unseenMissed = parsed.unseenMissed
       } catch (e) {
         root.history = []
       }
+      if (root.markSeenPending) Qt.callLater(root.refreshHistory)
     }
   }
 

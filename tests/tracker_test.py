@@ -101,5 +101,50 @@ ok = mode == "0o600"
 fails += 0 if ok else 1
 print(("ok   " if ok else "FAIL ") + f"perms: {mode}")
 
+# 9. unseen missed calls: counted over the whole log, cleared by --mark-seen,
+# and compared by when the call was logged, not when it started -- a call that
+# rings while the panel is open was not missed until after it was opened.
+import subprocess, time as _time
+seen_dir = os.path.join(tmp, "seen")
+os.mkdir(seen_dir, 0o700)
+seen_fd = mod.dir_fd_for(seen_dir)
+st = mod.CallTracker(seen_fd)
+for i in range(8):   # more misses than any historyLimit shows
+    st.handle({"type": "CALL_INCOMING", "id": f"m{i}", "peeruri": f"sip:{i}@pbx"})
+    st.handle({"type": "CALL_CLOSED", "id": f"m{i}"})
+st.handle({"type": "CALL_OUTGOING", "id": "o", "peeruri": "sip:o@pbx"})
+st.handle({"type": "CALL_CLOSED", "id": "o"})
+
+
+def hist(*extra):
+    env = {"HOME": tmp, "PATH": "/usr/bin:/bin", "OMARCHY_SIP_CONF": seen_dir, "XDG_RUNTIME_DIR": tmp}
+    out = subprocess.run([sys.executable, "-I", os.path.join(os.path.dirname(__file__), "..", "bin", "omarchy-sip"),
+                          "history", "--limit", "3", *extra], env=env, capture_output=True, timeout=20)
+    return json.loads(out.stdout)
+
+
+def check9(label, ok):
+    global fails
+    fails += 0 if ok else 1
+    print(("ok   " if ok else "FAIL ") + label)
+
+
+h = hist()
+check9("history reports rows and an unseen count", len(h["calls"]) == 3 and h["unseenMissed"] == 8)
+h = hist("--mark-seen")
+check9("--mark-seen clears the count", h["unseenMissed"] == 0 and h["seenTs"] > 0)
+check9("...and the seen file is private",
+       oct(os.stat(os.path.join(seen_dir, mod.SEEN)).st_mode & 0o777) == "0o600")
+early = _time.time() - 60          # started before the panel was opened...
+st.open_calls["late"] = {"direction": "in", "peer": "sip:late@pbx", "started": early,
+                         "answered": False, "answeredAt": 0.0}
+_time.sleep(0.01)
+st.handle({"type": "CALL_CLOSED", "id": "late"})   # ...missed after it
+check9("a call that started before the panel opened but was missed after still counts",
+       hist()["unseenMissed"] == 1)
+with open(os.path.join(seen_dir, mod.SEEN), "w") as fh:
+    fh.write("garbage")
+check9("a corrupt seen file counts everything as unseen", hist()["unseenMissed"] == 9)
+
 print("\nall passed" if not fails else f"\n{fails} FAILED")
 sys.exit(1 if fails else 0)

@@ -97,6 +97,7 @@ CONFIG = "config"
 RINGTONE = "ring.wav"
 HISTORY = "history.jsonl"
 OPTIONS = "options.json"
+SEEN = "seen"            # when the call log was last looked at
 BARESIP_LOG = "baresip.log"
 CONTROL = "control"
 UNIT = "omarchy-sip.service"
@@ -1001,6 +1002,10 @@ class CallTracker:
             "missed": call["direction"] == "in" and not call["answered"],
             "duration": int(now - call["answeredAt"]) if call["answered"] else 0,
             "reason": reason,
+            # When it was logged, which is what "seen since" compares against:
+            # a call that rang while the panel was open started before the
+            # panel was opened, but was not missed until after.
+            "end": round(now, 3),
         }
         try:
             lines = self.read_lines()
@@ -1032,6 +1037,7 @@ def history_record(obj: dict) -> dict:
         "missed": obj.get("missed") is True,
         "duration": max(0, min(int(obj.get("duration") or 0), 7 * 86400)),
         "reason": clip(obj.get("reason") or ""),
+        "end": float(obj.get("end") or obj.get("ts") or 0),
     }
 
 
@@ -1910,8 +1916,32 @@ def cmd_option(args) -> int:
     return 0
 
 
+def read_seen() -> float:
+    try:
+        return max(0.0, float(read_bounded(SEEN, conf_fd(), 64).strip() or 0))
+    except ValueError:
+        return 0.0
+
+
+def unseen_missed(seen: float) -> int:
+    """Missed calls logged after `seen`, over the whole log, not just the
+    rows the panel shows."""
+    count = 0
+    for record in read_history(MAX_HISTORY_RECORDS):
+        if record["missed"] and record["end"] > seen:
+            count += 1
+    return count
+
+
 def cmd_history(args) -> int:
-    print(json.dumps(read_history(args.limit), separators=(",", ":")))
+    if args.mark_seen:
+        write_private(SEEN, f"{time.time():.3f}\n", conf_fd())
+    seen = read_seen()
+    print(json.dumps({
+        "calls": read_history(args.limit),
+        "unseenMissed": unseen_missed(seen),
+        "seenTs": seen,
+    }, separators=(",", ":")))
     return 0
 
 
@@ -2119,6 +2149,8 @@ def main(argv: list[str]) -> int:
 
     p = sub.add_parser("history", help="recent calls as JSON, most recent first")
     p.add_argument("--limit", type=int, default=10)
+    p.add_argument("--mark-seen", action="store_true",
+                   help="record that the log has been looked at (clears the missed-call count)")
     p.set_defaults(func=cmd_history)
 
     p = sub.add_parser("option", help="show or set the daemon's own options")

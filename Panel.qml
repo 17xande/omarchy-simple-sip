@@ -96,7 +96,7 @@ Panel {
     var rows = [{ id: "setup", label: "Account settings", glyph: "\uf013", section: "primary" }]
     // Recent calls are actions too: they share the cursor model, so Enter on a
     // row redials it and the keyboard behaves the same everywhere.
-    for (var i = 0; i < sip.history.length; i++) {
+    for (var i = 0; i < sip.history.length && i < sip.historyLimit; i++) {
       var entry = sip.history[i]
       rows.push({
         id: "redial:" + Model.redialTarget(entry),
@@ -180,6 +180,8 @@ Panel {
   Connections {
     target: sip
     function onAccountDetailsChanged() { if (setupForm.visible) root.fillSetupForm() }
+    // A call missed while the panel is open has been seen.
+    function onUnseenMissedChanged() { if (root.opened && sip.unseenMissed > 0) sip.markHistorySeen() }
     function onCallStateChanged() {
       if (sip.callState !== "active") {
         root.keypadOpen = false
@@ -209,6 +211,7 @@ Panel {
     // The clock only ticks during a call, so stamp it on open to keep the
     // call log's relative times honest.
     clock.now = Date.now()
+    sip.markHistorySeen()
     sip.refresh()
     Qt.callLater(function() {
       if (dialField.visible) dialField.forceActiveFocus()
@@ -278,6 +281,21 @@ Panel {
             NumberAnimation { to: 1.0; duration: 500; easing.type: Easing.InOutQuad }
           }
           onVisibleChanged: if (!sip.ringing) opacity = 1.0
+        }
+
+        // Missed calls since the panel was last opened. A dot, not a count:
+        // at bar size a digit is noise, and the panel has the list.
+        Rectangle {
+          visible: sip.unseenMissed > 0 && !sip.onCall && !sip.ringing
+                   && sip.boolSetting("missedCallBadge", true)
+          width: Math.max(4, Math.round(Style.font.icon * 0.38))
+          height: width
+          radius: width / 2
+          color: root.bar ? root.bar.urgent : Color.urgent
+          anchors.right: parent.right
+          anchors.top: parent.top
+          anchors.rightMargin: Math.round(parent.width * 0.12)
+          anchors.topMargin: Math.round(parent.height * 0.14)
         }
       }
     }

@@ -31,7 +31,8 @@
       "autoOpenOnIncoming": true,
       "statusRefreshSec": 60,
       "historyLimit": 5,
-      "registrationAlerts": true
+      "registrationAlerts": true,
+      "missedCallBadge": true
     },
     "schema": [
       {
@@ -50,6 +51,12 @@
         "key": "registrationAlerts",
         "type": "boolean",
         "label": "Notify when the SIP registration is lost",
+        "defaultValue": true
+      },
+      {
+        "key": "missedCallBadge",
+        "type": "boolean",
+        "label": "Mark the bar icon when a call was missed",
         "defaultValue": true
       },
       {

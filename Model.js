@@ -289,6 +289,18 @@ function barGlyph(callState) {
 
 // ---------------------------------------------------------------- call log
 
+// `omarchy-sip history` output: {calls, unseenMissed}. An older CLI printed
+// the bare array, which still reads, with nothing unseen.
+function parseHistory(parsed) {
+  if (Array.isArray(parsed)) return { calls: parsed, unseenMissed: 0 }
+  var p = parsed || {}
+  var n = parseInt(p.unseenMissed, 10)
+  return {
+    calls: Array.isArray(p.calls) ? p.calls : [],
+    unseenMissed: isFinite(n) && n > 0 ? n : 0
+  }
+}
+
 // Direction arrows rather than phone glyphs: they read at row size and say
 // "out" / "in" without colour. A missed call keeps the inbound arrow (it was
 // an inbound call) and is distinguished by the urgent tint plus its meta text,

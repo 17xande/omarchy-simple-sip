@@ -3,7 +3,7 @@
 const fs = require("fs");
 const src = fs.readFileSync(require("path").join(__dirname, "..", "Model.js"), "utf8");
 const M = {};
-new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,validDigits,queueDigits,optionChanges,pickOptions,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,accountUri,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,callTitle,domainOf,historyGlyph,redialTarget,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
+new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,validDigits,queueDigits,optionChanges,pickOptions,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,accountUri,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,callTitle,domainOf,historyGlyph,parseHistory,redialTarget,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
 
 let fails = 0;
 const ESC = String.fromCharCode(27);
@@ -153,6 +153,10 @@ t("redial target is dialable", M.validTarget(M.redialTarget(mk({ peer: "sip:+155
 t("redial keeps sips", M.redialTarget(mk({ peer: "sips:bob@x.com;transport=tls" })), "sips:bob@x.com");
 t("redial display name form", M.redialTarget(mk({ peer: '"Bob" <sip:bob@x.com;user=phone>' })), "sip:bob@x.com");
 t("redial empty", M.redialTarget(mk({ peer: "" })), "");
+t("parseHistory object", M.parseHistory({ calls: [{ peer: "a" }], unseenMissed: 2 }), { calls: [{ peer: "a" }], unseenMissed: 2 });
+t("parseHistory legacy array", M.parseHistory([{ peer: "a" }]), { calls: [{ peer: "a" }], unseenMissed: 0 });
+t("parseHistory junk", M.parseHistory({ calls: "x", unseenMissed: "lots" }), { calls: [], unseenMissed: 0 });
+t("parseHistory negative", M.parseHistory({ calls: [], unseenMissed: -3 }), { calls: [], unseenMissed: 0 });
 t("hist label", M.historyLabel(mk({ peer: "sip:1001@pbx.example.com" })), "1001");
 t("hist label empty", M.historyLabel(mk({ peer: "" })), "unknown");
 t("hist missed", M.historyIsMissed(mk({ missed: true })), true);
