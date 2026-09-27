@@ -20,6 +20,15 @@ function stripAnsi(text) {
 // events the panel does not model (RTCP ticks, SDP exchanges, module noise),
 // which keeps the caller free of a long switch.
 function classifyEvent(ev) {
+  // A command response rather than an event. Only a refusal or failure of a
+  // command the panel sent (token "panel") matters here: a successful reply
+  // carries nothing the events do not, and other tokens belong to other
+  // clients' request/reply round trips, which every client sees broadcast.
+  if (ev && ev.response === true) {
+    if (ev.ok === false && String(ev.token || "") === "panel")
+      return { kind: "commandFailed", error: String(ev.data || "") || "Command failed" }
+    return null
+  }
   var type = String((ev && ev.type) || "")
   var peer = peerLabel((ev && ev.peeruri) || "")
 
@@ -108,16 +117,33 @@ function parseIncomingCall(data) {
 
 // Accept what a person would actually type. A bare extension or phone number
 // is completed with the account's domain; anything already URI-shaped is left
-// alone so `sips:` and explicit ports survive untouched.
+// alone so `sips:` and explicit ports survive untouched. A `tel:` URI is just a
+// phone number with a scheme, and a phone number may carry the separators
+// people write it with -- "+1 (555) 010-0100" -- none of which are dialable.
 function normalizeTarget(input, aor) {
   var target = String(input || "").trim().replace(/\s+/g, "")
   if (target === "") return ""
+  if (/^tel:/i.test(target)) target = target.substring(4).split(";")[0]
   if (/^sips?:/.test(target)) return target
   if (target.indexOf("@") > 0) return "sip:" + target
+  if (/^[+0-9*#().-]+$/.test(target) && /[0-9]/.test(target)) {
+    target = target.replace(/[().-]/g, "")
+  }
+  if (target === "") return ""
 
   var domain = domainOf(aor)
   if (!domain) return "sip:" + target
   return "sip:" + target + "@" + domain
+}
+
+// The daemon's own grammar for a dial or transfer target (see _COMMAND_GRAMMAR
+// in bin/omarchy-sip), mirrored here so the panel can refuse a target before
+// anything optimistic happens, instead of showing "Calling…" for a command the
+// daemon was always going to throw away. The daemon stays the authority.
+var TARGET_RE = /^sips?:[A-Za-z0-9._~:\/@%+*#-]{1,250}$/
+
+function validTarget(uri) {
+  return TARGET_RE.test(String(uri || ""))
 }
 
 function domainOf(aor) {

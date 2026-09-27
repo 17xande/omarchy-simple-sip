@@ -3,7 +3,7 @@
 const fs = require("fs");
 const src = fs.readFileSync(require("path").join(__dirname, "..", "Model.js"), "utf8");
 const M = {};
-new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,callTitle,domainOf,historyGlyph,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
+new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,callTitle,domainOf,historyGlyph,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
 
 let fails = 0;
 const ESC = String.fromCharCode(27);
@@ -20,6 +20,30 @@ t("normalize sips", M.normalizeTarget("sips:b@x", "sip:a@y"), "sips:b@x");
 t("normalize spaces", M.normalizeTarget(" 07700 900 123 ", "sip:a@pbx"), "sip:07700900123@pbx");
 t("normalize empty", M.normalizeTarget("   ", "sip:a@pbx"), "");
 t("normalize no account", M.normalizeTarget("1001", ""), "sip:1001");
+
+t("normalize tel uri", M.normalizeTarget("tel:+1-555-0100;phone-context=example.com", "sip:a@pbx"), "sip:+15550100@pbx");
+t("normalize phone separators", M.normalizeTarget("+1 (555) 010-0100", "sip:a@pbx"), "sip:+15550100100@pbx");
+t("normalize keeps dots in a username", M.normalizeTarget("john.doe", "sip:a@pbx"), "sip:john.doe@pbx");
+t("normalize keeps a feature code", M.normalizeTarget("*43", "sip:a@pbx"), "sip:*43@pbx");
+
+t("validTarget plain", M.validTarget("sip:1001@pbx.example.com"), true);
+t("validTarget port", M.validTarget("sip:b@x.com:5080"), true);
+t("validTarget feature code", M.validTarget("sip:*43@pbx"), true);
+t("validTarget refuses uri params", M.validTarget("sip:bob@host;transport=tcp"), false);
+t("validTarget refuses a quote", M.validTarget('sip:a@b"x'), false);
+t("validTarget refuses no scheme", M.validTarget("a@b"), false);
+t("validTarget refuses overlong", M.validTarget("sip:" + "a".repeat(251)), false);
+t("typed params are refused before dialling",
+  M.validTarget(M.normalizeTarget("sip:bob@host;transport=tcp", "sip:a@pbx")), false);
+
+t("classify refusal of a panel command",
+  M.classifyEvent({ response: true, ok: false, data: "command not permitted", token: "panel" }),
+  { kind: "commandFailed", error: "command not permitted" });
+t("classify refusal with no text", M.classifyEvent({ response: true, ok: false, token: "panel" }),
+  { kind: "commandFailed", error: "Command failed" });
+t("classify ignores a successful reply", M.classifyEvent({ response: true, ok: true, data: "", token: "panel" }), null);
+t("classify ignores another client's refusal",
+  M.classifyEvent({ response: true, ok: false, data: "x", token: "req-123" }), null);
 
 t("peerLabel params", M.peerLabel("sip:bob@192.168.22.10:5080;transport=udp"), "bob@192.168.22.10:5080");
 t("peerLabel angle", M.peerLabel('"Bob" <sip:bob@x.com>'), "bob@x.com");

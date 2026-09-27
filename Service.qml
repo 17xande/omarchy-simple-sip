@@ -92,6 +92,9 @@ Item {
   // call that started after it asked.
   property double lastCallEventAt: 0
   property double statusRequestedAt: 0
+  // When the panel last sent a dial. A refusal that arrives with no call event
+  // after this is the refusal of that dial, so the optimistic "Calling…" goes.
+  property double dialSentAt: 0
   // Recent calls, newest first, as recorded by the daemon.
   property var history: []
 
@@ -155,17 +158,38 @@ Item {
     historyWatchdog.restart()
   }
 
-  // Returns false when another action is already in flight, so a caller that
-  // needs to know whether its command actually went out (dial's optimistic UI)
-  // can fall back to a resync instead of assuming it did.
+  // Commands run one CLI process at a time, in order. One that arrives while
+  // another is in flight waits its turn rather than being dropped: an answer
+  // pressed a moment after a dial, or a hangup pressed twice, has to happen.
+  // The queue is bounded so a stuck daemon cannot make it grow without limit;
+  // returns false only when it is full, so a caller that needs to know whether
+  // its command will go out (dial's optimistic UI) can resync instead.
+  readonly property int maxQueuedCommands: 32
+  property var commandQueue: []
+
   function run(args) {
-    if (actionProcess.running) return false
+    if (actionProcess.running) {
+      if (commandQueue.length >= maxQueuedCommands) return false
+      commandQueue = commandQueue.concat([args])
+      return true
+    }
+    startAction(args)
+    return true
+  }
+
+  function startAction(args) {
     lastError = ""
     actionProcess.errText = ""
     actionProcess.command = [cli].concat(args)
     actionProcess.running = true
     actionWatchdog.restart()
-    return true
+  }
+
+  function drainQueue() {
+    if (actionProcess.running || commandQueue.length === 0) return
+    var next = commandQueue[0]
+    commandQueue = commandQueue.slice(1)
+    startAction(next)
   }
 
   // `omarchy-sip send` -- fire-and-forget, one line down the control socket --
@@ -188,8 +212,16 @@ Item {
   function dial(input) {
     var target = Model.normalizeTarget(input, aor)
     if (target === "") return
+    // Refuse here what the daemon would refuse there. Its refusal does come
+    // back (see "commandFailed" below), but only after the panel has already
+    // said "Calling…" -- checking first means it never says it.
+    if (!Model.validTarget(target)) {
+      lastError = elide("Can't dial " + target)
+      return
+    }
     // Optimistic: the panel switches to "calling" immediately and the real
     // CALL_OUTGOING / CALL_CLOSED event corrects it a moment later.
+    dialSentAt = Date.now()
     callState = "outgoing"
     peer = Model.peerLabel(target)
     callStartedAt = 0
@@ -250,6 +282,21 @@ Item {
 
     var update = Model.classifyEvent(event)
     if (!update) return
+
+    // `send` is fire-and-forget, so its process exits 0 whether or not the
+    // daemon accepted the command; the verdict arrives here, as a response
+    // with the panel's token. Without this a refused dial left "Calling…"
+    // on screen until the next periodic resync.
+    if (update.kind === "commandFailed") {
+      lastError = elide(update.error)
+      if (callState === "outgoing" && lastCallEventAt < dialSentAt) {
+        callState = "idle"
+        peer = ""
+        callId = ""
+        callStartedAt = 0
+      }
+      return
+    }
 
     if (update.kind === "ctrl") {
       daemonUp = update.connected
@@ -481,6 +528,9 @@ Item {
         // The optimistic dial never happened -- fall back to what is real.
         root.refresh()
       }
+      // Deferred: starting the next child from inside this one's exit
+      // handler would reassign `command` on a Process still tearing down.
+      Qt.callLater(root.drainQueue)
     }
   }
 
@@ -541,6 +591,7 @@ Item {
       actionProcess.running = false
       root.lastError = "Command timed out"
       root.refresh()
+      Qt.callLater(root.drainQueue)
     }
   }
 
