@@ -36,6 +36,7 @@ Panel {
   // Set once the person edits the setup form, so account details that arrive
   // late (the `account show` round trip) never overwrite what they typed.
   property bool setupTouched: false
+  property bool keypadOpen: false
 
   // A text field owns the keyboard whenever one is on screen, so letter
   // shortcuts (a / d / b) only apply in the states that have no input.
@@ -80,9 +81,13 @@ Panel {
     if (sip.onCall) {
       var inCall = [{ id: "mute", label: sip.muted ? "Unmute" : "Mute",
                       glyph: sip.muted ? "\uf131" : "\uf130", hint: "m" }]
-      if (sip.callState === "active")
+      if (sip.callState === "active") {
         inCall.push({ id: "hold", label: sip.onHold ? "Resume" : "Hold",
-                      glyph: sip.onHold ? "\uf04b" : "\uf04c", hint: "x" })
+                      glyph: sip.onHold ? "\uf04b" : "\uf04c", hint: "p" })
+        // nf-md-dialpad (U+F061C), outside the BMP, so spelt as its pair.
+        inCall.push({ id: "keypad", label: keypadOpen ? "Hide keypad" : "Keypad",
+                      glyph: "\udb81\ude1c", hint: "n" })
+      }
       inCall.push({ id: "hangup", label: "Hang up", glyph: "\uf00d", hint: "b" })
       return inCall
     }
@@ -111,6 +116,7 @@ Panel {
     case "hangup": sip.hangup(); break
     case "mute":   sip.toggleMute(); break
     case "hold":   sip.toggleHold(); break
+    case "keypad": keypadOpen = !keypadOpen; break
     case "setup":  setupOpen = true; break
     default:
       if (id.indexOf("redial:") === 0 && id.length > 7) sip.dial(id.substring(7))
@@ -171,6 +177,7 @@ Panel {
   Connections {
     target: sip
     function onAccountDetailsChanged() { if (setupForm.visible) root.fillSetupForm() }
+    function onCallStateChanged() { if (sip.callState !== "active") root.keypadOpen = false }
   }
 
   function placeCall() {
@@ -221,6 +228,7 @@ Panel {
     function hangup(): string { return root.ipcResult(sip.hangup()) }
     function mute(): string { return root.ipcResult(sip.toggleMute()) }
     function hold(): string { return root.ipcResult(sip.toggleHold()) }
+    function dtmf(digits: string): string { return root.ipcResult(sip.sendDigits(digits)) }
     function status(): string {
       return sip.callState + " " + (sip.peer || "-") + " " + sip.registration
     }
@@ -300,9 +308,13 @@ Panel {
         var key = String(t || "").toLowerCase()
         if (key === "a" && sip.callState === "incoming") sip.answer()
         else if ((key === "d" || key === "r") && sip.callState === "incoming") sip.hangup()
-        else if ((key === "b" || key === "h") && sip.onCall) sip.hangup()
+        // h j k l and x never arrive here: PanelKeyCatcher takes them for
+        // navigation and delete. Hence p for hold and n for the keypad.
+        else if (key === "b" && sip.onCall) sip.hangup()
         else if (key === "m" && sip.onCall) sip.toggleMute()
-        else if (key === "x" && sip.callState === "active") sip.toggleHold()
+        else if (key === "p" && sip.callState === "active") sip.toggleHold()
+        else if (key === "n" && sip.callState === "active") root.keypadOpen = !root.keypadOpen
+        else if (sip.callState === "active" && Model.validDigits(t)) sip.sendDigits(t)
         else if (key === "s") root.setupOpen = !root.setupOpen
       }
 
@@ -405,6 +417,41 @@ Panel {
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.body
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              visible: sip.callState === "active" && sip.sentDigits !== ""
+              text: "Sent: " + sip.sentDigits
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideLeft
+            }
+          }
+
+          // ---------- keypad ----------
+          Grid {
+            id: keypad
+            visible: root.keypadOpen && sip.callState === "active"
+            columns: 3
+            spacing: Style.space(6)
+            anchors.horizontalCenter: parent.horizontalCenter
+
+            Repeater {
+              model: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"]
+              PanelActionButton {
+                required property string modelData
+                iconText: modelData
+                tooltipText: "Send " + modelData
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                fontSize: Style.font.heading
+                size: Style.space(40)
+                bordered: true
+                onClicked: sip.sendDigits(modelData)
+              }
             }
           }
 

@@ -244,6 +244,26 @@ function pad2(n) {
   return n < 10 ? "0" + n : String(n)
 }
 
+// What a DTMF keypad has; mirrors the daemon's sndcode grammar.
+function validDigits(digits) {
+  return /^[0-9*#A-Da-d]{1,32}$/.test(String(digits || ""))
+}
+
+// Fold digits into the command queue: when the last queued command is also
+// DTMF and there is room, extend it rather than queue another process --
+// someone typing an account number at an IVR types faster than a CLI starts.
+// Returns the new queue; never mutates the one given.
+function queueDigits(queue, digits) {
+  var q = (queue || []).slice()
+  var last = q.length ? q[q.length - 1] : null
+  if (last && last[0] === "send" && last[1] === "sndcode" && (last[2] + digits).length <= 32) {
+    q[q.length - 1] = ["send", "sndcode", last[2] + digits]
+  } else {
+    q.push(["send", "sndcode", digits])
+  }
+  return q
+}
+
 function isRinging(callState) {
   return callState === "incoming"
 }

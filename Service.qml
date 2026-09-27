@@ -90,6 +90,8 @@ Item {
   // belong to the current call and are cleared whenever it changes.
   property bool muted: false
   property bool onHold: false
+  // DTMF sent during this call, for the panel to echo back (last 24 only).
+  property string sentDigits: ""
   // The last optimistic mute/hold change, so a refusal can put it back.
   property var pendingToggle: null
   // Which of the two sources spoke last. A status snapshot is a request/reply
@@ -322,6 +324,21 @@ Item {
     muted = false
     onHold = false
     pendingToggle = null
+    sentDigits = ""
+  }
+
+  function sendDigits(digits) {
+    var d = String(digits || "")
+    if (callState !== "active") return "no answered call"
+    if (!Model.validDigits(d)) return "not keypad digits: " + d
+    if (actionProcess.running) {
+      if (commandQueue.length >= maxQueuedCommands) return "too many commands queued"
+      commandQueue = Model.queueDigits(commandQueue, d)
+    } else {
+      startAction(["send", "sndcode", d])
+    }
+    sentDigits = (sentDigits + d).slice(-24)
+    return ""
   }
 
   function startDaemon() { run(["start"]) }

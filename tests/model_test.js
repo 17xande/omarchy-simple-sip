@@ -3,7 +3,7 @@
 const fs = require("fs");
 const src = fs.readFileSync(require("path").join(__dirname, "..", "Model.js"), "utf8");
 const M = {};
-new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,optionChanges,pickOptions,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,accountUri,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,callTitle,domainOf,historyGlyph,redialTarget,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
+new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,validDigits,queueDigits,optionChanges,pickOptions,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,accountUri,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,callTitle,domainOf,historyGlyph,redialTarget,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
 
 let fails = 0;
 const ESC = String.fromCharCode(27);
@@ -119,6 +119,18 @@ t("title muted", M.callTitle({ callState: "active", muted: true }), "In call \u0
 t("title muted while calling", M.callTitle({ callState: "outgoing", muted: true }), "Calling\u2026 \u00b7 Muted");
 t("title incoming ignores stale mute", M.callTitle({ callState: "incoming", muted: true }), "Incoming call");
 t("title idle", M.callTitle({ callState: "idle" }), "");
+t("digits valid", M.validDigits("0123456789*#"), true);
+t("digits refuse a letter", M.validDigits("1e"), false);
+t("digits refuse a separator", M.validDigits("1;2"), false);
+t("digits refuse empty", M.validDigits(""), false);
+t("queueDigits starts a command", M.queueDigits([], "1"), [["send", "sndcode", "1"]]);
+t("queueDigits extends queued DTMF", M.queueDigits([["send", "sndcode", "12"]], "3"), [["send", "sndcode", "123"]]);
+t("queueDigits does not extend another command",
+  M.queueDigits([["send", "hangup"]], "1"), [["send", "hangup"], ["send", "sndcode", "1"]]);
+t("queueDigits stops at the grammar's limit",
+  M.queueDigits([["send", "sndcode", "1".repeat(32)]], "2").length, 2);
+const q0 = [["send", "sndcode", "1"]]; M.queueDigits(q0, "2");
+t("queueDigits leaves its input alone", q0, [["send", "sndcode", "1"]]);
 t("duration 95s", M.durationText(1000, 1000 + 95000), "01:35");
 t("duration hours", M.durationText(1, 1 + 3725000), "1:02:05");
 t("duration unset", M.durationText(0, 5000), "");

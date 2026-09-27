@@ -541,6 +541,11 @@ check("dispatch allows hold and resume with no parameter",
       and dispatched(b'{"command":"resume"}')[0] == [("resume", "")])
 check("dispatch refuses hold given a call id",
       dispatched(b'{"command":"hold","params":"abc"}')[0] == [])
+check("dispatch sends DTMF digits",
+      dispatched(b'{"command":"sndcode","params":"123*#"}')[0] == [("sndcode 123*#", "")])
+check("dispatch refuses DTMF with anything a keypad does not have",
+      all(dispatched(('{"command":"sndcode","params":"%s"}' % v).encode())[0] == []
+          for v in ("12;quit", "1 2", "e", "", "1" * 33)))
 check("dispatch ignores malformed JSON", dispatched(b"not json") == ([], []))
 check("dispatch ignores a non-object", dispatched(b'["dial"]') == ([], []))
 check("dispatch clips an overlong token on the accepted path",
