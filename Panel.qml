@@ -93,7 +93,13 @@ Panel {
       inCall.push({ id: "hangup", label: "Hang up", glyph: "\uf00d", hint: "b" })
       return inCall
     }
-    var rows = [{ id: "setup", label: "Account settings", glyph: "\uf013", section: "primary" }]
+    var rows = []
+    if (sip.voicemailTarget !== "") {
+      rows.push({ id: "voicemail", label: "Voicemail", glyph: "\uf0e0", hint: "v",
+                  meta: sip.mwi.newCount > 0 ? sip.mwi.newCount + " new" : "",
+                  urgent: sip.mwi.newCount > 0, section: "primary" })
+    }
+    rows.push({ id: "setup", label: "Account settings", glyph: "\uf013", section: "primary" })
     // Recent calls are actions too: they share the cursor model, so Enter on a
     // row redials it and the keyboard behaves the same everywhere.
     for (var i = 0; i < sip.history.length && i < sip.historyLimit; i++) {
@@ -121,6 +127,7 @@ Panel {
     case "keypad": keypadOpen = !keypadOpen; break
     case "transfer": transferOpen = true; break
     case "setup":  setupOpen = true; break
+    case "voicemail": sip.dial(sip.voicemailTarget); break
     default:
       if (id.indexOf("redial:") === 0 && id.length > 7) sip.dial(id.substring(7))
     }
@@ -349,6 +356,7 @@ Panel {
         else if (key === "t" && sip.callState === "active") root.transferOpen = true
         else if (sip.callState === "active" && Model.validDigits(t)) sip.sendDigits(t)
         else if (key === "s") root.setupOpen = !root.setupOpen
+        else if (key === "v" && sip.callState === "idle" && sip.voicemailTarget !== "") sip.dial(sip.voicemailTarget)
       }
 
       Flickable {

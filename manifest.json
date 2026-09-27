@@ -32,7 +32,8 @@
       "statusRefreshSec": 60,
       "historyLimit": 5,
       "registrationAlerts": true,
-      "missedCallBadge": true
+      "missedCallBadge": true,
+      "voicemailNumber": ""
     },
     "schema": [
       {
@@ -76,6 +77,12 @@
         "max": 600,
         "step": 10,
         "defaultValue": 60
+      },
+      {
+        "key": "voicemailNumber",
+        "type": "string",
+        "label": "Voicemail number (blank: use the one your server announces)",
+        "defaultValue": ""
       }
     ]
   }

@@ -107,6 +107,8 @@ Item {
   property var history: []
   // Missed calls logged since the panel was last opened, over the whole log.
   property int unseenMissed: 0
+  // The last voicemail summary the server sent (see Model.parseMwi).
+  property var mwi: ({ waiting: false, newCount: 0, oldCount: 0, account: "" })
   property bool markSeenPending: false
   // The stored account as `account show` reports it -- everything the setup
   // form edits except the password, of which only hasPassword is known.
@@ -132,7 +134,8 @@ Item {
     callState: callState,
     lastError: lastError,
     muted: muted,
-    onHold: onHold
+    onHold: onHold,
+    newVoicemail: mwi.newCount
   })
 
   signal incomingCall(string peerUri)
@@ -157,6 +160,17 @@ Item {
     var n = parseInt(String(setting(name, fallback)), 10)
     if (!isFinite(n)) n = fallback
     return Math.max(min, Math.min(max, n))
+  }
+
+  function stringSetting(name, fallback, maxLength) {
+    return String(setting(name, fallback)).trim().substring(0, maxLength)
+  }
+
+  // Where "Call voicemail" goes: the configured number, or the account the
+  // voicemail server itself named. Empty when neither is known.
+  readonly property string voicemailTarget: {
+    var configured = stringSetting("voicemailNumber", "", 64)
+    return configured !== "" ? configured : String(mwi.account || "")
   }
 
   function boolSetting(name, fallback) {
@@ -459,6 +473,11 @@ Item {
       } else {
         refresh()
       }
+      return
+    }
+
+    if (update.kind === "mwi") {
+      mwi = update.mwi
       return
     }
 

@@ -247,6 +247,10 @@ module\t\t\tcontact.so
 module\t\t\tmenu.so
 module\t\t\tctrl_dbus.so
 
+# Voicemail waiting indication: subscribes to message-summary once registered
+# (accounts default to mwi=yes) and reports each NOTIFY as MWI_NOTIFY.
+module\t\t\tmwi.so
+
 # Session bus only. ctrl_tcp is deliberately not loaded: it is an unauthenticated
 # TCP listener reachable by every other user on the machine.
 ctrl_dbus_use\t\tsession
@@ -1550,11 +1554,17 @@ def cmd_daemon(_args) -> int:
                             # same object ctrl_tcp used to emit, one per line.
                             # Safe because JSON escapes newlines.
                             text = item[1]
-                            hub.broadcast(text)
                             try:
                                 event = json.loads(text)
                             except ValueError:
+                                hub.broadcast(text)
                                 continue
+                            # The voicemail summary is state, not news: a panel
+                            # that connects later needs the last one too.
+                            if isinstance(event, dict) and event.get("type") == "MWI_NOTIFY":
+                                hub.greet(text, "MWI")
+                            else:
+                                hub.broadcast(text)
                             if isinstance(event, dict):
                                 tracker.handle(event)
                                 alerts.handle(event)

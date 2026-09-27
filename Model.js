@@ -58,6 +58,10 @@ function classifyEvent(ev) {
   case "UNREGISTERING":
     return { kind: "registration", registration: "none" }
 
+  // -- voicemail waiting indication (RFC 3842 message-summary body)
+  case "MWI_NOTIFY":
+    return { kind: "mwi", mwi: parseMwi((ev && ev.param) || "") }
+
   // -- a blind transfer we asked for was refused by the far end. Success
   // needs no case of its own: the call simply closes ("Call transfered").
   case "TRANSFER_FAILED":
@@ -153,6 +157,33 @@ function parseIncomingCall(data) {
     return { peer: match ? peerLabel(match[1]) : "" }
   }
   return null
+}
+
+// A message-summary body, as the voicemail server sends it:
+//   Messages-Waiting: yes
+//   Message-Account: sip:*97@pbx.example.com
+//   Voice-Message: 2/8 (0/2)
+// -> { waiting: true, newCount: 2, oldCount: 8, account: "sip:*97@pbx..." }
+// Tolerant of case and missing lines; counts are clamped so a hostile
+// server cannot put a nine-digit number in the panel.
+function parseMwi(body) {
+  var out = { waiting: false, newCount: 0, oldCount: 0, account: "" }
+  var lines = String(body || "").split(/\r?\n/)
+  for (var i = 0; i < lines.length && i < 64; i++) {
+    var m = lines[i].match(/^\s*([A-Za-z-]+)\s*:\s*(.*?)\s*$/)
+    if (!m) continue
+    var key = m[1].toLowerCase()
+    if (key === "messages-waiting") out.waiting = m[2].toLowerCase() === "yes"
+    else if (key === "message-account") out.account = m[2].substring(0, 256)
+    else if (key === "voice-message") {
+      var counts = m[2].match(/^(\d+)\s*\/\s*(\d+)/)
+      if (counts) {
+        out.newCount = Math.min(999, parseInt(counts[1], 10))
+        out.oldCount = Math.min(999, parseInt(counts[2], 10))
+      }
+    }
+  }
+  return out
 }
 
 // ------------------------------------------------------------------ dialling
@@ -364,8 +395,9 @@ function heroMeta(state) {
   var s = state || {}
   if (!s.daemonUp) return "Daemon stopped"
   if (!s.configured) return "No account configured"
+  var vm = s.newVoicemail > 0 ? " · " + s.newVoicemail + " new voicemail" + (s.newVoicemail === 1 ? "" : "s") : ""
   switch (s.registration) {
-  case "registered": return s.aor
+  case "registered": return s.aor + vm
   case "pending":    return "Registering…"
   case "failed":     return s.lastError || "Registration failed"
   case "none":       return s.aor + " · not registering"

@@ -3,7 +3,7 @@
 const fs = require("fs");
 const src = fs.readFileSync(require("path").join(__dirname, "..", "Model.js"), "utf8");
 const M = {};
-new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,validDigits,queueDigits,optionChanges,pickOptions,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,accountUri,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,callTitle,domainOf,historyGlyph,parseHistory,redialTarget,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
+new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,parseMwi,validDigits,queueDigits,optionChanges,pickOptions,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,accountUri,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,callTitle,domainOf,historyGlyph,parseHistory,redialTarget,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
 
 let fails = 0;
 const ESC = String.fromCharCode(27);
@@ -133,6 +133,20 @@ const q0 = [["send", "sndcode", "1"]]; M.queueDigits(q0, "2");
 t("queueDigits leaves its input alone", q0, [["send", "sndcode", "1"]]);
 t("classify transfer failure", M.classifyEvent({ type: "TRANSFER_FAILED", param: "603 Decline" }),
   { kind: "transferFailed", error: "603 Decline" });
+t("mwi waiting", M.parseMwi("Messages-Waiting: yes\r\nMessage-Account: sip:*97@pbx.example.com\r\nVoice-Message: 2/8 (0/2)\r\n"),
+  { waiting: true, newCount: 2, oldCount: 8, account: "sip:*97@pbx.example.com" });
+t("mwi none", M.parseMwi("Messages-Waiting: no\r\nVoice-Message: 0/3\r\n"),
+  { waiting: false, newCount: 0, oldCount: 3, account: "" });
+t("mwi case and spacing", M.parseMwi("messages-waiting:YES\nvoice-message : 1 / 0"),
+  { waiting: true, newCount: 1, oldCount: 0, account: "" });
+t("mwi clamps counts", M.parseMwi("Voice-Message: 123456789/5").newCount, 999);
+t("mwi empty", M.parseMwi(""), { waiting: false, newCount: 0, oldCount: 0, account: "" });
+t("classify mwi", M.classifyEvent({ type: "MWI_NOTIFY", param: "Messages-Waiting: yes\r\nVoice-Message: 1/0" }),
+  { kind: "mwi", mwi: { waiting: true, newCount: 1, oldCount: 0, account: "" } });
+t("hero with voicemail", M.heroMeta({ daemonUp: true, configured: true, registration: "registered", aor: "sip:a@x", newVoicemail: 2 }),
+  "sip:a@x \u00b7 2 new voicemails");
+t("hero with one voicemail", M.heroMeta({ daemonUp: true, configured: true, registration: "registered", aor: "sip:a@x", newVoicemail: 1 }),
+  "sip:a@x \u00b7 1 new voicemail");
 t("duration 95s", M.durationText(1000, 1000 + 95000), "01:35");
 t("duration hours", M.durationText(1, 1 + 3725000), "1:02:05");
 t("duration unset", M.durationText(0, 5000), "");
