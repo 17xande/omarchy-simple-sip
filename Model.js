@@ -320,8 +320,9 @@ function inCall(callState) {
 // together. State is carried by colour and the ringing blink, not by shape,
 // except for in-call which gets the filled square so a glance tells you the
 // line is busy.
-function barGlyph(callState) {
+function barGlyph(callState, dnd) {
   if (callState === "active") return "\uf098"   // nf-fa-phone_square
+  if (dnd && callState === "idle") return "\uf1f6"   // nf-fa-bell_slash
   return "\uf095"                             // nf-fa-phone
 }
 
@@ -414,7 +415,7 @@ function historyMeta(entry, nowMs) {
   var e = entry || {}
   var when = relativeTime(e.ts, nowMs)
   var what
-  if (e.missed) what = "Missed"
+  if (e.missed) what = e.reason === "DND" ? "Missed · DND" : "Missed"
   else if (!e.duration) what = "No answer"
   else what = formatDuration(e.duration)
   return when + " · " + what

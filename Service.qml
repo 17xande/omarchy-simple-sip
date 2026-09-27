@@ -122,6 +122,10 @@ Item {
   // bar does not write the same option once per monitor.
   property bool optionSync: false
   property var pendingOptions: ({})
+  // Do Not Disturb as the panel should show it: a toggle still on its way to
+  // the daemon counts, so the row flips at once.
+  readonly property bool dnd: typeof pendingOptions.dnd === "boolean" ? pendingOptions.dnd
+                                                                      : daemonOptions.dnd === true
 
   readonly property bool ready: daemonUp && configured && registration === "registered"
   readonly property bool busy: actionProcess.running
@@ -261,6 +265,12 @@ Item {
     pending[key] = value
     pendingOptions = pending
     run(["option", "set", key, value ? "on" : "off"])
+  }
+
+  function toggleDnd() {
+    if (typeof daemonOptions.dnd !== "boolean") return "the daemon has not reported its options yet"
+    setOption("dnd", !dnd)
+    return ""
   }
 
   onSettingsChanged: syncOptions()
@@ -535,6 +545,10 @@ Item {
       lastError = update.registration === "failed" ? (update.error || "Registration failed") : ""
       return
     }
+
+    // Under Do Not Disturb the daemon turns an incoming call away within
+    // milliseconds; ringing for it here would only flash the panel open.
+    if (update.kind === "call" && update.callState === "incoming" && dnd) return
 
     if (update.kind === "call") {
       lastCallEventAt = Date.now()

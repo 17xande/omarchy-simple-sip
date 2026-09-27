@@ -128,6 +128,8 @@ Panel {
                   meta: sip.mwi.newCount > 0 ? sip.mwi.newCount + " new" : "",
                   urgent: sip.mwi.newCount > 0, section: "primary" })
     }
+    rows.push({ id: "dnd", label: "Do not disturb", glyph: "\uf1f6", hint: "q",
+                meta: sip.dnd ? "On — calls go to voicemail" : "", urgent: sip.dnd, section: "primary" })
     rows.push({ id: "setup", label: "Account settings", glyph: "\uf013", section: "primary" })
     // Recent calls are actions too: they share the cursor model, so Enter on a
     // row redials it and the keyboard behaves the same everywhere.
@@ -158,6 +160,7 @@ Panel {
     case "transfer": transferOpen = true; break
     case "setup":  setupOpen = true; break
     case "voicemail": sip.dial(sip.voicemailTarget); break
+    case "dnd":    sip.toggleDnd(); break
     default:
       if (id.indexOf("redial:") === 0 && id.length > 7) sip.dial(id.substring(7))
       else if (id.indexOf("call:") === 0 && id.length > 5) { dialText = ""; sip.dial(id.substring(5)) }
@@ -319,6 +322,10 @@ Panel {
     function hold(): string { return root.ipcResult(sip.toggleHold()) }
     function dtmf(digits: string): string { return root.ipcResult(sip.sendDigits(digits)) }
     function transfer(uri: string): string { return root.ipcResult(sip.transfer(uri)) }
+    function dnd(): string {
+      var reason = sip.toggleDnd()
+      return reason ? "refused: " + reason : (sip.dnd ? "on" : "off")
+    }
     function status(): string {
       return sip.callState + " " + (sip.peer || "-") + " " + sip.registration
     }
@@ -339,7 +346,7 @@ Panel {
         Text {
           textFormat: Text.PlainText
           anchors.centerIn: parent
-          text: Model.barGlyph(sip.callState)
+          text: Model.barGlyph(sip.callState, sip.dnd)
           color: sip.ringing ? (root.bar ? root.bar.urgent : Color.urgent)
                              : (sip.onCall || sip.ready ? root.barForeground
                                                         : Qt.darker(root.barForeground, 1.55))
@@ -428,6 +435,7 @@ Panel {
         else if (key === "t" && sip.callState === "active") root.transferOpen = true
         else if (sip.callState === "active" && Model.validDigits(t)) sip.sendDigits(t)
         else if (key === "s") root.setupOpen = !root.setupOpen
+        else if (key === "q" && !sip.onCall && sip.callState !== "incoming") sip.toggleDnd()
         else if (key === "v" && sip.callState === "idle" && sip.voicemailTarget !== "") sip.dial(sip.voicemailTarget)
         else if (key === "c" && root.cursorAction() && root.cursorAction().contactUri)
           root.openContact(root.cursorAction().contactUri)
@@ -468,7 +476,7 @@ Panel {
             iconComponent: Component {
               Text {
                 textFormat: Text.PlainText
-                text: Model.barGlyph(sip.callState)
+                text: Model.barGlyph(sip.callState, sip.dnd)
                 color: sip.ringing ? root.urgent : root.foreground
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.display

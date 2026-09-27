@@ -93,6 +93,7 @@ directory too to remove every trace, including the stored SIP password.
 | Hold / resume | click **Hold** during an answered call | `p` | `omarchy-shell io.github.17xande.simple-sip hold` |
 | Keypad tones (DTMF) | click **Keypad**, then the digits | type `0`–`9` `*` `#`; `n` shows the keypad | `omarchy-shell io.github.17xande.simple-sip dtmf 1234#` |
 | Transfer (blind) | click **Transfer…**, enter the target | `t` | `omarchy-shell io.github.17xande.simple-sip transfer sip:1002@pbx` |
+| Do not disturb | click **Do not disturb** | `q` | `omarchy-shell io.github.17xande.simple-sip dnd` |
 | Account settings | click the gear row | `s` | — |
 
 A bare extension or phone number is completed with your account's domain, so `1001`
@@ -115,6 +116,17 @@ The log is written by the daemon, not the panel, so a call that starts and ends 
 the shell is restarting is still recorded. It lives in
 `~/.config/omarchy-sip/history.jsonl` (mode `0600`, last 50 calls), and
 `historyLimit: 0` in the widget settings hides the section entirely.
+
+### Do not disturb
+
+While it is on, the daemon turns every incoming call away with *480 Temporarily
+Unavailable* — which a PBX normally answers by sending the caller to voicemail —
+without ringing, notifying or opening the panel. The call is still logged, as
+"Missed · DND", and still marks the bar. The bar icon becomes a crossed-out bell.
+It is enforced by the daemon, so it holds while the shell is closed.
+
+baresip has a `dnd` of its own, but it refuses the call before one exists, so
+nothing would be logged at all.
 
 ### Contacts
 

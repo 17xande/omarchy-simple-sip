@@ -168,6 +168,10 @@ t("matchContacts empty query", M.matchContacts(" ", BOOK, 5), []);
 t("classify prefill number", M.classifyEvent({ type: "PREFILL", target: "+15550100" }), { kind: "prefill", target: "+15550100" });
 t("classify prefill address", M.classifyEvent({ type: "PREFILL", target: "sip:a@b" }), { kind: "prefill", target: "sip:a@b" });
 t("classify prefill refuses junk", M.classifyEvent({ type: "PREFILL", target: "sip:a@b;x" }), null);
+t("glyph dnd idle is a bell-slash", M.barGlyph("idle", true), "\uf1f6");
+t("glyph dnd does not hide a call", M.barGlyph("active", true), "\uf098");
+t("meta missed under dnd", M.historyMeta({ ts: 1787900000, direction: "in", missed: true, reason: "DND" }, 1787900000000),
+  "just now \u00b7 Missed \u00b7 DND");
 t("duration 95s", M.durationText(1000, 1000 + 95000), "01:35");
 t("duration hours", M.durationText(1, 1 + 3725000), "1:02:05");
 t("duration unset", M.durationText(0, 5000), "");

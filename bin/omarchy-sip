@@ -1064,7 +1064,13 @@ class CallTracker:
         elif etype == "CALL_CLOSED":
             call = self.open_calls.pop(call_id, None)
             if call:
-                self.append(call, event.get("param") or "")
+                self.append(call, "DND" if call.get("dnd") else (event.get("param") or ""))
+
+    def mark_dnd(self, call_id: str) -> None:
+        """This call was turned away under Do Not Disturb; log it as such."""
+        call = self.open_calls.get(call_id or "-")
+        if call:
+            call["dnd"] = True
 
     def append(self, call: dict, reason: str) -> None:
         now = time.time()
@@ -1374,6 +1380,30 @@ class Notifier:
 
 REG_ALERT_AFTER = 30.0   # seconds of lost registration before we say so
 
+# A SIP Call-ID is chosen by whoever places the call, and baresip's `hangup`
+# takes it as the first token of a command line. Only what a sane Call-ID
+# uses gets that far; anything else is not turned away by id at all.
+CALL_ID = re.compile(r"^[A-Za-z0-9._~@:+!%*-]{1,128}$")
+
+
+def dnd_reject(event: dict, options: dict, tracker, invoke) -> bool:
+    """Turn an incoming call away under Do Not Disturb.
+
+    480 Temporarily Unavailable, which a PBX normally answers by sending the
+    caller to voicemail -- and unlike baresip's own `dnd`, which refuses the
+    INVITE before any call exists, the call is still logged, as a miss with
+    reason DND. Rejected by call id, never "the current call": a bare hangup
+    could end a different call already in progress. Returns whether it did.
+    """
+    if event.get("type") != "CALL_INCOMING" or not options.get("dnd"):
+        return False
+    call_id = str(event.get("id") or "")
+    tracker.mark_dnd(call_id)
+    if not CALL_ID.match(call_id):
+        return False
+    invoke(f"hangup {call_id} scode=480")
+    return True
+
 
 class CallAlerts:
     """Decides what the daemon notifies, from baresip's own events.
@@ -1398,6 +1428,7 @@ class CallAlerts:
         self.clock = clock
         self.ringing: dict[str, str] = {}   # call id -> caller label
         self.answered: set[str] = set()
+        self.quiet: set[str] = set()        # arrived under Do Not Disturb
         self.ever_registered = False
         self.lost_since: float | None = None
         self.reg_error = ""
@@ -1419,7 +1450,9 @@ class CallAlerts:
         opts = self.options()
         if etype == "CALL_INCOMING":
             self.ringing[call_id] = self.caller(event)
-            if opts.get("notifications"):
+            if opts.get("dnd"):
+                self.quiet.add(call_id)   # not now, and not afterwards either
+            elif opts.get("notifications"):
                 self.notifier.notify(
                     f"call:{call_id}", "Incoming call", notify_text(self.ringing[call_id]),
                     actions=(("default", "Open"), ("answer", "Answer"), ("reject", "Reject")),
@@ -1432,8 +1465,10 @@ class CallAlerts:
         elif etype == "CALL_CLOSED":
             label = self.ringing.pop(call_id, None)
             answered = call_id in self.answered
+            quiet = call_id in self.quiet
             self.answered.discard(call_id)
-            if label is None:
+            self.quiet.discard(call_id)
+            if label is None or quiet:
                 return
             if not answered and opts.get("notifications"):
                 self.notifier.notify(
@@ -1652,6 +1687,8 @@ def cmd_daemon(_args) -> int:
                                 hub.broadcast(text)
                             if isinstance(event, dict):
                                 tracker.handle(event)
+                                dnd_reject(event, options, tracker,
+                                           lambda line: bus.invoke(line, "dnd"))
                                 alerts.handle(event)
                         else:
                             _, token, text, ok = item

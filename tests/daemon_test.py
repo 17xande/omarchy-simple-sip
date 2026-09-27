@@ -264,5 +264,37 @@ for bad in ('/a"b', "/a$b", "/a%u", "/a`b", "/a\\b"):
     check(f"a desktop entry is not written for the path {bad!r}", refused)
 mod.SELF = orig_self
 
+# ------------------------------------------------------------- do not disturb
+
+dtmp = tempfile.mkdtemp()
+dfd = mod.dir_fd_for(dtmp)
+tracker = mod.CallTracker(dfd)
+sent = []
+opts = dict(mod.OPTION_DEFAULTS, dnd=True)
+ev = {"type": "CALL_INCOMING", "id": "a84b4c76e66710", "peeruri": "sip:1001@pbx"}
+tracker.handle(ev)
+check("under DND an incoming call is rejected with 480, by its own id",
+      mod.dnd_reject(ev, opts, tracker, sent.append) and sent == ["hangup a84b4c76e66710 scode=480"])
+tracker.handle({"type": "CALL_CLOSED", "id": "a84b4c76e66710", "param": "480 Temporarily Unavailable"})
+row = json.loads(open(os.path.join(dtmp, mod.HISTORY)).read().strip())
+check("...and logged as a miss, reason DND", row["missed"] is True and row["reason"] == "DND")
+
+sent.clear()
+check("with DND off nothing is rejected",
+      not mod.dnd_reject(ev, dict(mod.OPTION_DEFAULTS), tracker, sent.append) and sent == [])
+check("an outgoing call is never rejected",
+      not mod.dnd_reject({"type": "CALL_OUTGOING", "id": "x"}, opts, tracker, sent.append) and sent == [])
+for hostile in ("abc scode=200", "abc\nquit", "abc;x", "", "a" * 200, "abc def"):
+    sent.clear()
+    check(f"a Call-ID of {hostile[:20]!r} is never put on baresip's command line",
+          not mod.dnd_reject({"type": "CALL_INCOMING", "id": hostile}, opts, tracker, sent.append)
+          and sent == [])
+check("...and never falls back to a bare hangup, which could end another call", sent == [])
+
+alerts, n, _, _, options = make(dnd=True)
+alerts.handle({"type": "CALL_INCOMING", "id": "q", "peeruri": "sip:1@pbx"})
+alerts.handle({"type": "CALL_CLOSED", "id": "q"})
+check("under DND nothing is notified, during or after", n.sent == [])
+
 print("\nall passed" if not fails else f"\n{fails} FAILED")
 sys.exit(1 if fails else 0)
