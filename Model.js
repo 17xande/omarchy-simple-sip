@@ -307,6 +307,24 @@ function queueDigits(queue, digits) {
   return q
 }
 
+// A panel that opens by itself for an incoming call takes the keyboard from
+// whatever the person was typing into, and their next "a" would answer the
+// call, "d" reject it. So after an auto-open, keys are ignored until the
+// keyboard has been quiet for `quietMs`; each key pressed in that window
+// restarts it, so steady typing never reaches a shortcut. Returns whether
+// this key is swallowed, and the new end of the window.
+function typingGuard(nowMs, untilMs, quietMs) {
+  if (nowMs < untilMs) return { swallow: true, until: nowMs + quietMs }
+  return { swallow: false, until: untilMs }
+}
+
+// Tones the keyboard may send during a call. baresip also accepts A-D, but a
+// letter typed during a call is far likelier to be a stray keystroke than a
+// military-keypad tone; those stay reachable through IPC `dtmf`.
+function isKeypadKey(text) {
+  return /^[0-9*#]$/.test(String(text || ""))
+}
+
 function isRinging(callState) {
   return callState === "incoming"
 }

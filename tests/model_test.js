@@ -3,7 +3,7 @@
 const fs = require("fs");
 const src = fs.readFileSync(require("path").join(__dirname, "..", "Model.js"), "utf8");
 const M = {};
-new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,parseMwi,validDigits,queueDigits,optionChanges,pickOptions,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,accountUri,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,barTooltip,lastOutbound,callTitle,domainOf,historyGlyph,parseHistory,contactName,matchContacts,redialTarget,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
+new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,typingGuard,isKeypadKey,parseMwi,validDigits,queueDigits,optionChanges,pickOptions,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,accountUri,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,barTooltip,lastOutbound,callTitle,domainOf,historyGlyph,parseHistory,contactName,matchContacts,redialTarget,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
 
 let fails = 0;
 const ESC = String.fromCharCode(27);
@@ -183,6 +183,11 @@ t("tooltip failed", M.barTooltip({ daemonUp: true, configured: true, registratio
   "SIP \u00b7 registration failed: 403");
 t("lastOutbound", M.lastOutbound([{ direction: "in", peer: "sip:a@b" }, { direction: "out", peer: "sip:c@d;user=phone" }]), "sip:c@d");
 t("lastOutbound none", M.lastOutbound([{ direction: "in", peer: "sip:a@b" }]), "");
+t("guard swallows a key inside the window and extends it", M.typingGuard(1000, 1500, 1500), { swallow: true, until: 2500 });
+t("guard lets a key through after quiet", M.typingGuard(2000, 1500, 1500), { swallow: false, until: 1500 });
+t("guard unarmed", M.typingGuard(5, 0, 1500), { swallow: false, until: 0 });
+t("keypad keys", ["0", "9", "*", "#"].every(M.isKeypadKey), true);
+t("letters are not keypad keys", ["a", "A", "d", "12", ""].some(M.isKeypadKey), false);
 t("duration 95s", M.durationText(1000, 1000 + 95000), "01:35");
 t("duration hours", M.durationText(1, 1 + 3725000), "1:02:05");
 t("duration unset", M.durationText(0, 5000), "");

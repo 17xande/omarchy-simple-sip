@@ -40,6 +40,17 @@ Panel {
   property bool transferOpen: false
   // The address being saved as a contact, or "" when the form is closed.
   property string contactUri: ""
+  // End of the quiet window after an auto-open; see Model.typingGuard.
+  property double typingGuardUntil: 0
+  readonly property int typingQuietMs: 1500
+
+  // True when this key must be swallowed because the panel opened by itself
+  // under someone's typing; also extends the window.
+  function guardKey() {
+    var g = Model.typingGuard(Date.now(), typingGuardUntil, typingQuietMs)
+    typingGuardUntil = g.until
+    return g.swallow
+  }
 
   readonly property var suggestions: dialRow.visible
     ? Model.matchContacts(dialText, sip.contacts, 5) : []
@@ -294,7 +305,10 @@ Panel {
     // Ringing is the one thing worth interrupting for: surface the panel so
     // Answer is one click away rather than buried behind the bar icon.
     onIncomingCall: function(peerUri) {
-      if (root.isLeader && sip.boolSetting("autoOpenOnIncoming", true)) root.summonHere()
+      if (!sip.boolSetting("autoOpenOnIncoming", true)) return
+      // Every copy arms it: the one that opens is the focused monitor's.
+      root.typingGuardUntil = Date.now() + root.typingQuietMs
+      if (root.isLeader) root.summonHere()
     }
     onShowRequested: if (root.isLeader) root.summonHere()
     // A clicked link fills the dial field and opens the panel; the person
@@ -447,6 +461,7 @@ Panel {
       blocked: root.fieldFocused
 
       onMoveRequested: function(dx, dy) {
+        if (root.guardKey()) return
         if (!root.cursorActive) { root.cursorActive = true; return }
         // Up from the first row goes back to the dial field it came from.
         if (dy < 0 && root.cursorIndex === 0 && dialRow.visible) {
@@ -457,6 +472,7 @@ Panel {
         if (dy !== 0) root.moveCursor(dy)
       }
       onActivateRequested: {
+        if (root.guardKey()) return
         if (root.cursorActive && root.actions.length > 0) {
           root.activate(root.actions[Math.min(root.cursorIndex, root.actions.length - 1)].id)
         }
@@ -464,6 +480,7 @@ Panel {
       onCloseRequested: root.close()
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
+        if (root.guardKey()) return
         var key = String(t || "").toLowerCase()
         if (key === "a" && sip.callState === "incoming") sip.answer()
         else if ((key === "d" || key === "r") && sip.callState === "incoming") sip.hangup()
@@ -474,7 +491,7 @@ Panel {
         else if (key === "p" && sip.callState === "active") sip.toggleHold()
         else if (key === "n" && sip.callState === "active") root.keypadOpen = !root.keypadOpen
         else if (key === "t" && sip.callState === "active") root.transferOpen = true
-        else if (sip.callState === "active" && Model.validDigits(t)) sip.sendDigits(t)
+        else if (sip.callState === "active" && Model.isKeypadKey(t)) sip.sendDigits(t)
         else if (key === "s") root.setupOpen = !root.setupOpen
         else if (key === "q" && !sip.onCall && sip.callState !== "incoming") sip.toggleDnd()
         else if (key === "v" && sip.callState === "idle" && sip.voicemailTarget !== "") sip.dial(sip.voicemailTarget)
