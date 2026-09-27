@@ -92,6 +92,7 @@ directory too to remove every trace, including the stored SIP password.
 | Mute / unmute | click **Mute** during a call | `m` | `omarchy-shell io.github.17xande.simple-sip mute` |
 | Hold / resume | click **Hold** during an answered call | `p` | `omarchy-shell io.github.17xande.simple-sip hold` |
 | Keypad tones (DTMF) | click **Keypad**, then the digits | type `0`–`9` `*` `#`; `n` shows the keypad | `omarchy-shell io.github.17xande.simple-sip dtmf 1234#` |
+| Transfer (blind) | click **Transfer…**, enter the target | `t` | `omarchy-shell io.github.17xande.simple-sip transfer sip:1002@pbx` |
 | Account settings | click the gear row | `s` | — |
 
 A bare extension or phone number is completed with your account's domain, so `1001`
@@ -372,7 +373,7 @@ ever called as `systemctl --user` and only ever names this plugin's own unit,
 
 ## Not in this version
 
-- No multiple accounts, no call transfer.
+- No multiple accounts, and transfer is blind only (no attended transfer).
 - Direct IP-to-IP calls need a reachable interface; baresip refuses loopback
   destinations with `no laddr for 127.0.0.1`.
 

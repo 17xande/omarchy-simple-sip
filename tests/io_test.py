@@ -546,6 +546,11 @@ check("dispatch sends DTMF digits",
 check("dispatch refuses DTMF with anything a keypad does not have",
       all(dispatched(('{"command":"sndcode","params":"%s"}' % v).encode())[0] == []
           for v in ("12;quit", "1 2", "e", "", "1" * 33)))
+check("dispatch transfers to a dialable target",
+      dispatched(b'{"command":"transfer","params":"sip:1002@pbx"}')[0] == [("transfer sip:1002@pbx", "")])
+check("dispatch refuses a transfer target the dial grammar would refuse",
+      all(dispatched(('{"command":"transfer","params":"%s"}' % v).encode())[0] == []
+          for v in ("sip:a@b;quit", "sip:a@b quit", "1002", "")))
 check("dispatch ignores malformed JSON", dispatched(b"not json") == ([], []))
 check("dispatch ignores a non-object", dispatched(b'["dial"]') == ([], []))
 check("dispatch clips an overlong token on the accepted path",

@@ -1614,6 +1614,8 @@ _COMMAND_GRAMMAR: dict[str, "re.Pattern[str] | None"] = {
     # DTMF: each character is sent as a digit, in order. Only what a keypad
     # has -- 0-9, *, # and the rarely-seen A-D.
     "sndcode": re.compile(r"^[0-9*#A-Da-d]{1,32}$"),
+    # Blind transfer of the current call: same target grammar as dial.
+    "transfer": re.compile(r"^sips?:[A-Za-z0-9._~:/@%+*#-]{1,250}$"),
 }
 
 

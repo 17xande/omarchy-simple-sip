@@ -320,6 +320,21 @@ Item {
     return ""
   }
 
+  // Blind transfer: hand the current call to someone else and drop out. The
+  // far end is asked (REFER); if it agrees the call closes like any other,
+  // and if not a TRANSFER_FAILED event says why.
+  function transfer(input) {
+    if (!onCall) return "no call in progress"
+    var target = Model.normalizeTarget(input, aor)
+    if (target === "") return "nothing to transfer to"
+    if (!Model.validTarget(target)) {
+      lastError = elide("Can't transfer to " + target)
+      return "not a dialable address: " + target
+    }
+    if (!command("transfer", target)) return "too many commands queued"
+    return ""
+  }
+
   function resetCallControls() {
     muted = false
     onHold = false
@@ -429,6 +444,11 @@ Item {
       } else {
         refresh()
       }
+      return
+    }
+
+    if (update.kind === "transferFailed") {
+      lastError = elide("Transfer failed" + (update.error ? ": " + update.error : ""))
       return
     }
 

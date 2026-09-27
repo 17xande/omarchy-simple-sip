@@ -37,10 +37,11 @@ Panel {
   // late (the `account show` round trip) never overwrite what they typed.
   property bool setupTouched: false
   property bool keypadOpen: false
+  property bool transferOpen: false
 
   // A text field owns the keyboard whenever one is on screen, so letter
   // shortcuts (a / d / b) only apply in the states that have no input.
-  readonly property bool textInputActive: dialRow.visible || setupForm.visible
+  readonly property bool textInputActive: dialRow.visible || setupForm.visible || transferRow.visible
 
   // ...and when the last one leaves the screen, the keyboard has to come back.
   // Nothing else claims it: dialField takes focus when it appears and no one
@@ -87,6 +88,7 @@ Panel {
         // nf-md-dialpad (U+F061C), outside the BMP, so spelt as its pair.
         inCall.push({ id: "keypad", label: keypadOpen ? "Hide keypad" : "Keypad",
                       glyph: "\udb81\ude1c", hint: "n" })
+        inCall.push({ id: "transfer", label: "Transfer…", glyph: "\uf064", hint: "t" })
       }
       inCall.push({ id: "hangup", label: "Hang up", glyph: "\uf00d", hint: "b" })
       return inCall
@@ -117,6 +119,7 @@ Panel {
     case "mute":   sip.toggleMute(); break
     case "hold":   sip.toggleHold(); break
     case "keypad": keypadOpen = !keypadOpen; break
+    case "transfer": transferOpen = true; break
     case "setup":  setupOpen = true; break
     default:
       if (id.indexOf("redial:") === 0 && id.length > 7) sip.dial(id.substring(7))
@@ -177,7 +180,17 @@ Panel {
   Connections {
     target: sip
     function onAccountDetailsChanged() { if (setupForm.visible) root.fillSetupForm() }
-    function onCallStateChanged() { if (sip.callState !== "active") root.keypadOpen = false }
+    function onCallStateChanged() {
+      if (sip.callState !== "active") {
+        root.keypadOpen = false
+        root.transferOpen = false
+      }
+    }
+  }
+
+  function doTransfer() {
+    if (transferField.text.trim() === "") return
+    if (sip.transfer(transferField.text) === "") transferOpen = false
   }
 
   function placeCall() {
@@ -229,6 +242,7 @@ Panel {
     function mute(): string { return root.ipcResult(sip.toggleMute()) }
     function hold(): string { return root.ipcResult(sip.toggleHold()) }
     function dtmf(digits: string): string { return root.ipcResult(sip.sendDigits(digits)) }
+    function transfer(uri: string): string { return root.ipcResult(sip.transfer(uri)) }
     function status(): string {
       return sip.callState + " " + (sip.peer || "-") + " " + sip.registration
     }
@@ -314,6 +328,7 @@ Panel {
         else if (key === "m" && sip.onCall) sip.toggleMute()
         else if (key === "p" && sip.callState === "active") sip.toggleHold()
         else if (key === "n" && sip.callState === "active") root.keypadOpen = !root.keypadOpen
+        else if (key === "t" && sip.callState === "active") root.transferOpen = true
         else if (sip.callState === "active" && Model.validDigits(t)) sip.sendDigits(t)
         else if (key === "s") root.setupOpen = !root.setupOpen
       }
@@ -428,6 +443,39 @@ Panel {
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
               elide: Text.ElideLeft
+            }
+          }
+
+          // ---------- transfer ----------
+          RowLayout {
+            id: transferRow
+            visible: root.transferOpen && sip.callState === "active"
+            width: parent.width
+            spacing: Style.space(6)
+
+            TextField {
+              id: transferField
+              Layout.fillWidth: true
+              placeholderText: "Transfer to extension or sip:user@host"
+              foreground: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              onAccepted: root.doTransfer()
+              Keys.onEscapePressed: root.transferOpen = false
+              onVisibleChanged: {
+                if (visible) Qt.callLater(forceActiveFocus)
+                else text = ""
+              }
+            }
+
+            PanelActionButton {
+              iconText: "\uf064"
+              tooltipText: "Transfer"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              enabled: transferField.text.trim() !== ""
+              Layout.alignment: Qt.AlignVCenter
+              onClicked: root.doTransfer()
             }
           }
 

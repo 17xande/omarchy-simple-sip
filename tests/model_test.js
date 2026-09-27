@@ -131,6 +131,8 @@ t("queueDigits stops at the grammar's limit",
   M.queueDigits([["send", "sndcode", "1".repeat(32)]], "2").length, 2);
 const q0 = [["send", "sndcode", "1"]]; M.queueDigits(q0, "2");
 t("queueDigits leaves its input alone", q0, [["send", "sndcode", "1"]]);
+t("classify transfer failure", M.classifyEvent({ type: "TRANSFER_FAILED", param: "603 Decline" }),
+  { kind: "transferFailed", error: "603 Decline" });
 t("duration 95s", M.durationText(1000, 1000 + 95000), "01:35");
 t("duration hours", M.durationText(1, 1 + 3725000), "1:02:05");
 t("duration unset", M.durationText(0, 5000), "");

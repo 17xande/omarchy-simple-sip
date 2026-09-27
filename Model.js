@@ -58,6 +58,11 @@ function classifyEvent(ev) {
   case "UNREGISTERING":
     return { kind: "registration", registration: "none" }
 
+  // -- a blind transfer we asked for was refused by the far end. Success
+  // needs no case of its own: the call simply closes ("Call transfered").
+  case "TRANSFER_FAILED":
+    return { kind: "transferFailed", error: String((ev && ev.param) || "") }
+
   // -- calls. `id` lets us ignore events for a call we are not showing.
   case "CALL_INCOMING":
     return { kind: "call", callState: "incoming", peer: peer, callId: (ev && ev.id) || "" }
