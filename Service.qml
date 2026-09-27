@@ -249,7 +249,8 @@ Item {
   function wantedOptions() {
     return {
       notifications: boolSetting("ringNotifications", true),
-      regAlerts: boolSetting("registrationAlerts", true)
+      regAlerts: boolSetting("registrationAlerts", true),
+      aec: boolSetting("echoCancellation", false)
     }
   }
 

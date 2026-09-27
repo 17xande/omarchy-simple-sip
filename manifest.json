@@ -33,7 +33,8 @@
       "historyLimit": 5,
       "registrationAlerts": true,
       "missedCallBadge": true,
-      "voicemailNumber": ""
+      "voicemailNumber": "",
+      "echoCancellation": false
     },
     "schema": [
       {
@@ -68,6 +69,12 @@
         "max": 20,
         "step": 1,
         "defaultValue": 5
+      },
+      {
+        "key": "echoCancellation",
+        "type": "boolean",
+        "label": "Echo cancellation (for speakers without a headset; restarts the daemon)",
+        "defaultValue": false
       },
       {
         "key": "statusRefreshSec",

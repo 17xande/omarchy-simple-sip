@@ -296,5 +296,25 @@ alerts.handle({"type": "CALL_INCOMING", "id": "q", "peeruri": "sip:1@pbx"})
 alerts.handle({"type": "CALL_CLOSED", "id": "q"})
 check("under DND nothing is notified, during or after", n.sent == [])
 
+# ------------------------------------------------------- echo cancellation
+
+aec_dir = tempfile.mkdtemp()
+orig_conf = mod.CONF_DIR
+mod.CONF_DIR = aec_dir
+afd = mod.conf_fd()
+mod.ensure_config()
+check("echo cancellation is off by default",
+      "webrtc_aec.so" not in open(os.path.join(aec_dir, "config")).read())
+mod.write_options(dict(mod.OPTION_DEFAULTS, aec=True), afd)
+mod.ensure_config()
+cfg = open(os.path.join(aec_dir, "config")).read()
+check("turning it on loads webrtc_aec, once", cfg.count("module\t\t\twebrtc_aec.so") == 1)
+check("...after the audio device module",
+      cfg.index("webrtc_aec.so") > cfg.index("module\t\t\tpulse.so"))
+mod.write_options(dict(mod.OPTION_DEFAULTS, aec=False), afd)
+mod.ensure_config()
+check("turning it off removes it", "webrtc_aec" not in open(os.path.join(aec_dir, "config")).read())
+mod.CONF_DIR = orig_conf
+
 print("\nall passed" if not fails else f"\n{fails} FAILED")
 sys.exit(1 if fails else 0)

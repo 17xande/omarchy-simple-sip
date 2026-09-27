@@ -245,7 +245,7 @@ module\t\t\tg711.so
 
 # audio device
 module\t\t\tpulse.so
-
+{aec}
 # call control
 module\t\t\taccount.so
 module\t\t\tcontact.so
@@ -609,6 +609,13 @@ def ensure_config() -> None:
         if not exists_at(name, fd):
             write_private(name, "", fd)
     interface = f"net_interface\t\t{SIP_INTERFACE}" if SIP_INTERFACE else ""
+    # Echo cancellation, opt-in: it is what makes laptop speakers usable
+    # without a headset, and costs CPU and a little latency with one. It is an
+    # audio filter module, so it only takes effect when baresip starts.
+    aec = (
+        "\n# echo cancellation (the echoCancellation setting)\n"
+        "module\t\t\twebrtc_aec.so\n"
+    ) if read_options(fd).get("aec") else ""
     # Regenerated every start: the module list and the transport are ours, not
     # the user's, so a stale config can never quietly break calls -- and the
     # transport has to be re-derived whenever the account changes.
@@ -619,6 +626,7 @@ def ensure_config() -> None:
             listen=SIP_LISTEN,
             transports=account_transport(),
             interface=interface,
+            aec=aec,
             ring=os.path.join(CONF_DIR, RINGTONE),
         ),
         fd,
