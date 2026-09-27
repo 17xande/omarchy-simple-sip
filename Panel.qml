@@ -72,7 +72,7 @@ Panel {
     for (var i = 0; i < sip.history.length; i++) {
       var entry = sip.history[i]
       rows.push({
-        id: "redial:" + (entry.peer || ""),
+        id: "redial:" + Model.redialTarget(entry),
         label: Model.historyLabel(entry),
         glyph: Model.historyGlyph(entry),
         meta: Model.historyMeta(entry, clock.now),
@@ -91,7 +91,7 @@ Panel {
     case "hangup": sip.hangup(); break
     case "setup":  setupOpen = true; break
     default:
-      if (id.indexOf("redial:") === 0) sip.dial(id.substring(7))
+      if (id.indexOf("redial:") === 0 && id.length > 7) sip.dial(id.substring(7))
     }
   }
 

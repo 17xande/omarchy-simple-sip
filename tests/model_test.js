@@ -3,7 +3,7 @@
 const fs = require("fs");
 const src = fs.readFileSync(require("path").join(__dirname, "..", "Model.js"), "utf8");
 const M = {};
-new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,callTitle,domainOf,historyGlyph,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
+new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,callTitle,domainOf,historyGlyph,redialTarget,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
 
 let fails = 0;
 const ESC = String.fromCharCode(27);
@@ -109,6 +109,11 @@ const NOW = 1787900000000;
 const mk = (o) => Object.assign({ ts: NOW / 1000, direction: "out", peer: "sip:1001@pbx", missed: false, duration: 0 }, o);
 t("hist glyph out", M.historyGlyph(mk({})), "\u2197");
 t("hist glyph in", M.historyGlyph(mk({ direction: "in" })), "\u2199");
+t("redial strips uri params", M.redialTarget(mk({ peer: "sip:+15550100@gw.example.com;user=phone" })), "sip:+15550100@gw.example.com");
+t("redial target is dialable", M.validTarget(M.redialTarget(mk({ peer: "sip:+15550100@gw;user=phone" }))), true);
+t("redial keeps sips", M.redialTarget(mk({ peer: "sips:bob@x.com;transport=tls" })), "sips:bob@x.com");
+t("redial display name form", M.redialTarget(mk({ peer: '"Bob" <sip:bob@x.com;user=phone>' })), "sip:bob@x.com");
+t("redial empty", M.redialTarget(mk({ peer: "" })), "");
 t("hist label", M.historyLabel(mk({ peer: "sip:1001@pbx.example.com" })), "1001");
 t("hist label empty", M.historyLabel(mk({ peer: "" })), "unknown");
 t("hist missed", M.historyIsMissed(mk({ missed: true })), true);

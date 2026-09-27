@@ -225,6 +225,18 @@ function historyIsMissed(entry) {
   return !!(entry && entry.missed)
 }
 
+// What selecting a row dials. The log keeps the peer as baresip reported it,
+// and an inbound From URI routinely carries parameters -- `;user=phone` from
+// any PSTN gateway -- which the daemon's dial grammar refuses, and rightly:
+// they would reach baresip's command line. The address itself is what
+// "call them back" means, so that is what is dialled.
+function redialTarget(entry) {
+  var peer = String((entry && entry.peer) || "")
+  var label = peerLabel(peer)
+  if (label === "") return ""
+  return (/^\s*(?:[^<]*<)?sips:/.test(peer) ? "sips:" : "sip:") + label
+}
+
 function historyLabel(entry) {
   return peerShort((entry && entry.peer) || "") || "unknown"
 }

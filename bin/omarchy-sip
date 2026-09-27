@@ -859,6 +859,23 @@ def journal(obj: dict) -> None:
 HISTORY_LIMIT = 50
 
 
+def peer_uri(uri: str) -> str:
+    """The bare address of a peer: display name, angle brackets and URI
+    parameters removed, scheme kept -- `"Bob" <sip:+1555@gw;user=phone>` is
+    `sip:+1555@gw`. The log is what the panel redials from, and parameters
+    are exactly what the dial grammar refuses; mirrors Model.redialTarget().
+    """
+    value = str(uri or "").strip()
+    if "<" in value:
+        value = value.split("<", 1)[1]
+    value = value.split(">", 1)[0].strip()
+    scheme, sep, rest = value.partition(":")
+    if not sep or scheme.lower() not in ("sip", "sips"):
+        scheme, rest = "sip", value
+    rest = rest.split(";", 1)[0].split("?", 1)[0]
+    return f"{scheme.lower()}:{rest}" if rest else ""
+
+
 class CallTracker:
     """Turns the event stream into a persistent call log.
 
@@ -880,7 +897,7 @@ class CallTracker:
         if etype in ("CALL_INCOMING", "CALL_OUTGOING"):
             self.open_calls[call_id] = {
                 "direction": "in" if etype == "CALL_INCOMING" else "out",
-                "peer": event.get("peeruri") or "",
+                "peer": peer_uri(event.get("peeruri") or ""),
                 "started": time.time(),
                 "answered": False,
                 "answeredAt": 0.0,

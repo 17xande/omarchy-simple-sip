@@ -78,6 +78,23 @@ ok = len(capped) == 3 and json.loads(capped[-1])["peer"] == "sip:9@pbx"
 fails += 0 if ok else 1
 print(("ok   " if ok else "FAIL ") + f"cap: {len(capped)} rows, newest kept")
 
+# 7b. the log keeps the bare address, which is what the panel redials: an
+# inbound From URI with `;user=phone` would be refused by the dial grammar.
+pt = mod.CallTracker(dir_fd, "params.jsonl")
+pt.handle({"type": "CALL_INCOMING", "id": "p",
+           "peeruri": '"Gateway" <sip:+15550100@gw.example.com;user=phone>'})
+pt.handle({"type": "CALL_CLOSED", "id": "p"})
+stored = json.loads(open(os.path.join(tmp, "params.jsonl")).read().strip())["peer"]
+ok = stored == "sip:+15550100@gw.example.com"
+fails += 0 if ok else 1
+print(("ok   " if ok else "FAIL ") + f"peer stored without params: {stored}")
+for raw, want in (("sips:b@x;transport=tls", "sips:b@x"), ("sip:a@b?Subject=x", "sip:a@b"),
+                  ("", ""), ("bob@x", "sip:bob@x")):
+    got = mod.peer_uri(raw)
+    ok = got == want
+    fails += 0 if ok else 1
+    print(("ok   " if ok else "FAIL ") + f"peer_uri({raw!r}) = {got!r}")
+
 # 8. history file must be private -- it is a record of who you called
 mode = oct(os.stat(path).st_mode & 0o777)
 ok = mode == "0o600"
