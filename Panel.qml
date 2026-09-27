@@ -289,6 +289,7 @@ Panel {
     id: sip
     settings: root.settings
     optionSync: root.isLeader
+    mediaControl: root.isLeader
 
     // Ringing is the one thing worth interrupting for: surface the panel so
     // Answer is one click away rather than buried behind the bar icon.
@@ -322,6 +323,7 @@ Panel {
     function hold(): string { return root.ipcResult(sip.toggleHold()) }
     function dtmf(digits: string): string { return root.ipcResult(sip.sendDigits(digits)) }
     function transfer(uri: string): string { return root.ipcResult(sip.transfer(uri)) }
+    function redial(): string { return root.ipcResult(sip.redial()) }
     function dnd(): string {
       var reason = sip.toggleDnd()
       return reason ? "refused: " + reason : (sip.dnd ? "on" : "off")
@@ -337,15 +339,54 @@ Panel {
 
   // ------------------------------------------------------------- bar button
 
+  // The call timer beside the icon, when asked for, on a horizontal bar.
+  readonly property bool timerOnBar: sip.callState === "active" && !button.vertical
+                                     && sip.boolSetting("showCallTimer", false)
+  readonly property string callDuration: Model.durationText(sip.callStartedAt, clock.now)
+
+  TextMetrics {
+    id: timerMetrics
+    font.family: root.fontFamily
+    font.pixelSize: Style.font.body
+    text: root.callDuration || "00:00"
+  }
+
   BarIconButton {
     id: button
     anchors.fill: parent
     bar: root.bar
+    fixedWidth: root.timerOnBar ? slotSize + Math.ceil(timerMetrics.advanceWidth) + Style.space(4)
+                                : (vertical ? -1 : slotSize)
+    tooltipText: Model.barTooltip({
+      daemonUp: sip.daemonUp, configured: sip.configured, registration: sip.registration,
+      aor: sip.aor, lastError: sip.lastError, callState: sip.callState,
+      peerName: Model.contactName(sip.peer, sip.contacts) || Model.peerShort(sip.peer),
+      duration: root.callDuration, muted: sip.muted, onHold: sip.onHold, dnd: sip.dnd,
+      unseenMissed: sip.unseenMissed, newVoicemail: sip.mwi.newCount
+    })
     iconComponent: Component {
       Item {
+        // Timer text to the right of the glyph; the glyph moves left by half
+        // its width so the pair stays centred on the widened button.
         Text {
           textFormat: Text.PlainText
-          anchors.centerIn: parent
+          visible: root.timerOnBar
+          anchors.verticalCenter: parent.verticalCenter
+          anchors.left: glyph.right
+          anchors.leftMargin: Style.space(4)
+          text: root.callDuration
+          color: root.barForeground
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.body
+        }
+
+        Text {
+          id: glyph
+          textFormat: Text.PlainText
+          anchors.verticalCenter: parent.verticalCenter
+          anchors.horizontalCenter: parent.horizontalCenter
+          anchors.horizontalCenterOffset: root.timerOnBar
+            ? -Math.ceil((timerMetrics.advanceWidth + Style.space(4)) / 2) : 0
           text: Model.barGlyph(sip.callState, sip.dnd)
           color: sip.ringing ? (root.bar ? root.bar.urgent : Color.urgent)
                              : (sip.onCall || sip.ready ? root.barForeground
@@ -396,7 +437,7 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(340))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(520))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(600))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -594,30 +635,6 @@ Panel {
             }
           }
 
-          // ---------- keypad ----------
-          Grid {
-            id: keypad
-            visible: root.keypadOpen && sip.callState === "active"
-            columns: 3
-            spacing: Style.space(6)
-            anchors.horizontalCenter: parent.horizontalCenter
-
-            Repeater {
-              model: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"]
-              PanelActionButton {
-                required property string modelData
-                iconText: modelData
-                tooltipText: "Send " + modelData
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                fontSize: Style.font.heading
-                size: Style.space(40)
-                bordered: true
-                onClicked: sip.sendDigits(modelData)
-              }
-            }
-          }
-
           // ---------- dial ----------
           RowLayout {
             id: dialRow
@@ -689,6 +706,32 @@ Panel {
                 required property var modelData
                 width: actionColumn.width
                 action: modelData
+              }
+            }
+          }
+
+          // ---------- keypad ----------
+          // Below the in-call rows, not above them: opened above, it pushed
+          // Hang up out of view.
+          Grid {
+            id: keypad
+            visible: root.keypadOpen && sip.callState === "active"
+            columns: 3
+            spacing: Style.space(6)
+            anchors.horizontalCenter: parent.horizontalCenter
+
+            Repeater {
+              model: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"]
+              PanelActionButton {
+                required property string modelData
+                iconText: modelData
+                tooltipText: "Send " + modelData
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                fontSize: Style.font.heading
+                size: Style.space(40)
+                bordered: true
+                onClicked: sip.sendDigits(modelData)
               }
             }
           }
@@ -887,7 +930,7 @@ Panel {
     id: clock
     property double now: Date.now()
     interval: 1000
-    running: root.opened && sip.callState === "active"
+    running: sip.callState === "active" && (root.opened || root.timerOnBar || button.tooltipHovered)
     repeat: true
     onTriggered: now = Date.now()
     onRunningChanged: if (running) now = Date.now()
@@ -938,12 +981,15 @@ Panel {
       anchors.rightMargin: Style.space(10)
       spacing: Style.space(8)
 
+      // A fixed-width cell, so labels line up whatever the glyph's width.
       Text {
         textFormat: Text.PlainText
         text: actionRow.action ? actionRow.action.glyph : ""
         color: actionRow.tint
         font.family: root.fontFamily
         font.pixelSize: Style.font.icon
+        horizontalAlignment: Text.AlignHCenter
+        Layout.preferredWidth: Math.ceil(Style.font.icon * 1.3)
         Layout.alignment: Qt.AlignVCenter
       }
 

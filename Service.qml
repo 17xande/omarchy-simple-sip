@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import Quickshell.Services.Mpris
 import "Model.js" as Model
 
 // Owns everything stateful about the SIP account and the current call.
@@ -121,6 +122,11 @@ Item {
   // Set by the panel on exactly one copy of the widget, so a multi-monitor
   // bar does not write the same option once per monitor.
   property bool optionSync: false
+  // Also leader-only: pausing media once, not once per monitor.
+  property bool mediaControl: false
+  // Players this service paused for the current call, by D-Bus name, so only
+  // those are resumed -- never something the person paused themselves.
+  property var pausedPlayers: []
   property var pendingOptions: ({})
   // Do Not Disturb as the panel should show it: a toggle still on its way to
   // the daemon counts, so the row flips at once.
@@ -378,6 +384,45 @@ Item {
     }
     if (!command("transfer", target)) return "too many commands queued"
     return ""
+  }
+
+  function pauseMedia() {
+    if (!mediaControl || !boolSetting("pauseMediaOnCall", true)) return
+    var players = Mpris.players ? Mpris.players.values : []
+    var paused = pausedPlayers.slice()
+    for (var i = 0; i < players.length; i++) {
+      var p = players[i]
+      if (p && p.isPlaying && p.canPause) {
+        p.pause()
+        if (paused.indexOf(p.dbusName) < 0) paused.push(p.dbusName)
+      }
+    }
+    pausedPlayers = paused
+  }
+
+  function resumeMedia() {
+    if (pausedPlayers.length === 0) return
+    var players = Mpris.players ? Mpris.players.values : []
+    for (var i = 0; i < players.length; i++) {
+      var p = players[i]
+      if (p && pausedPlayers.indexOf(p.dbusName) >= 0 && !p.isPlaying && p.canPlay) p.play()
+    }
+    pausedPlayers = []
+  }
+
+  // Idle -> anything is a call starting (ringing or dialling); anything ->
+  // idle is it ending, answered or not.
+  property string previousCallState: "idle"
+  onCallStateChanged: {
+    if (previousCallState === "idle" && callState !== "idle") pauseMedia()
+    else if (callState === "idle") resumeMedia()
+    previousCallState = callState
+  }
+
+  function redial() {
+    var target = Model.lastOutbound(history)
+    if (target === "") return "no outgoing call to redial"
+    return dial(target)
   }
 
   function resetCallControls() {

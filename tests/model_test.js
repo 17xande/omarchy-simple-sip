@@ -3,7 +3,7 @@
 const fs = require("fs");
 const src = fs.readFileSync(require("path").join(__dirname, "..", "Model.js"), "utf8");
 const M = {};
-new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,parseMwi,validDigits,queueDigits,optionChanges,pickOptions,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,accountUri,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,callTitle,domainOf,historyGlyph,parseHistory,contactName,matchContacts,redialTarget,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
+new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,parseMwi,validDigits,queueDigits,optionChanges,pickOptions,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,accountUri,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,barTooltip,lastOutbound,callTitle,domainOf,historyGlyph,parseHistory,contactName,matchContacts,redialTarget,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
 
 let fails = 0;
 const ESC = String.fromCharCode(27);
@@ -172,6 +172,17 @@ t("glyph dnd idle is a bell-slash", M.barGlyph("idle", true), "\uf1f6");
 t("glyph dnd does not hide a call", M.barGlyph("active", true), "\uf098");
 t("meta missed under dnd", M.historyMeta({ ts: 1787900000, direction: "in", missed: true, reason: "DND" }, 1787900000000),
   "just now \u00b7 Missed \u00b7 DND");
+t("tooltip registered", M.barTooltip({ daemonUp: true, configured: true, registration: "registered", aor: "sip:1001@pbx", callState: "idle" }),
+  "SIP \u00b7 1001@pbx");
+t("tooltip in call", M.barTooltip({ daemonUp: true, configured: true, callState: "active", peerName: "Mum", duration: "01:05", muted: true }),
+  "In call with Mum \u00b7 01:05 \u00b7 muted");
+t("tooltip extras", M.barTooltip({ daemonUp: true, configured: true, registration: "registered", aor: "sip:a@b", callState: "idle",
+  dnd: true, unseenMissed: 2, newVoicemail: 1 }), "SIP \u00b7 a@b\nDo not disturb\n2 missed calls\n1 new voicemail");
+t("tooltip daemon down", M.barTooltip({ daemonUp: false }), "SIP daemon stopped");
+t("tooltip failed", M.barTooltip({ daemonUp: true, configured: true, registration: "failed", lastError: "403", callState: "idle" }),
+  "SIP \u00b7 registration failed: 403");
+t("lastOutbound", M.lastOutbound([{ direction: "in", peer: "sip:a@b" }, { direction: "out", peer: "sip:c@d;user=phone" }]), "sip:c@d");
+t("lastOutbound none", M.lastOutbound([{ direction: "in", peer: "sip:a@b" }]), "");
 t("duration 95s", M.durationText(1000, 1000 + 95000), "01:35");
 t("duration hours", M.durationText(1, 1 + 3725000), "1:02:05");
 t("duration unset", M.durationText(0, 5000), "");

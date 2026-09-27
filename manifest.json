@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.17xande.simple-sip",
   "name": "Simple SIP",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "Alexandre Figueiredo",
   "license": "MIT",
   "description": "A simple SIP softphone in the Omarchy bar: register one account, place calls, and answer incoming ones. Powered by baresip.",
@@ -34,7 +34,9 @@
       "registrationAlerts": true,
       "missedCallBadge": true,
       "voicemailNumber": "",
-      "echoCancellation": false
+      "echoCancellation": false,
+      "showCallTimer": false,
+      "pauseMediaOnCall": true
     },
     "schema": [
       {
@@ -54,6 +56,18 @@
         "type": "boolean",
         "label": "Notify when the SIP registration is lost",
         "defaultValue": true
+      },
+      {
+        "key": "pauseMediaOnCall",
+        "type": "boolean",
+        "label": "Pause media players during calls",
+        "defaultValue": true
+      },
+      {
+        "key": "showCallTimer",
+        "type": "boolean",
+        "label": "Show the call timer on the bar",
+        "defaultValue": false
       },
       {
         "key": "missedCallBadge",

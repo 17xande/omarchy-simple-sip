@@ -455,6 +455,42 @@ function heroMeta(state) {
   return s.aor || "Starting…"
 }
 
+// The bar icon's tooltip: what the icon alone cannot say. First line is the
+// state that matters most right now; extras follow, one per line.
+function barTooltip(state) {
+  var s = state || {}
+  var lines = []
+  if (!s.daemonUp) lines.push("SIP daemon stopped")
+  else if (!s.configured) lines.push("SIP · no account configured")
+  else if (s.callState === "incoming") lines.push("Incoming call from " + (s.peerName || "unknown caller"))
+  else if (s.callState === "active") {
+    lines.push((s.onHold ? "On hold with " : "In call with ") + (s.peerName || "unknown")
+               + (s.duration ? " · " + s.duration : "") + (s.muted ? " · muted" : ""))
+  } else if (s.callState === "outgoing" || s.callState === "ringing") {
+    lines.push("Calling " + (s.peerName || "…"))
+  } else {
+    switch (s.registration) {
+    case "registered": lines.push("SIP · " + peerLabel(s.aor)); break
+    case "pending":    lines.push("SIP · registering…"); break
+    case "failed":     lines.push("SIP · registration failed" + (s.lastError ? ": " + s.lastError : "")); break
+    default:           lines.push("SIP · not registered")
+    }
+  }
+  if (s.dnd) lines.push("Do not disturb")
+  if (s.unseenMissed > 0) lines.push(s.unseenMissed + " missed call" + (s.unseenMissed === 1 ? "" : "s"))
+  if (s.newVoicemail > 0) lines.push(s.newVoicemail + " new voicemail" + (s.newVoicemail === 1 ? "" : "s"))
+  return lines.join("\n")
+}
+
+// The most recent call we placed, for "redial": [] -> "".
+function lastOutbound(history) {
+  var list = history || []
+  for (var i = 0; i < list.length; i++) {
+    if (list[i] && list[i].direction === "out") return redialTarget(list[i])
+  }
+  return ""
+}
+
 function callTitle(state) {
   var s = state || {}
   var title = ""

@@ -94,11 +94,37 @@ directory too to remove every trace, including the stored SIP password.
 | Keypad tones (DTMF) | click **Keypad**, then the digits | type `0`–`9` `*` `#`; `n` shows the keypad | `omarchy-shell io.github.17xande.simple-sip dtmf 1234#` |
 | Transfer (blind) | click **Transfer…**, enter the target | `t` | `omarchy-shell io.github.17xande.simple-sip transfer sip:1002@pbx` |
 | Do not disturb | click **Do not disturb** | `q` | `omarchy-shell io.github.17xande.simple-sip dnd` |
+| Redial last outgoing call | select it in Recent calls | — | `omarchy-shell io.github.17xande.simple-sip redial` |
+| Call voicemail | click **Voicemail** | `v` | — |
+| Save as contact | right-click a call | `c` on a row | `omarchy-sip contacts add …` |
 | Account settings | click the gear row | `s` | — |
 
-A bare extension or phone number is completed with your account's domain, so `1001`
-dials `sip:1001@pbx.example.com`. Incoming calls raise a critical-urgency
-notification and (by default) open the panel.
+Every IPC call answers `ok`, or `refused: <why>` when there was nothing to do. A
+bare extension or phone number is completed with your account's domain, so `1001`
+dials `sip:1001@pbx.example.com`; `tel:` numbers and the separators people write
+numbers with (`+1 (555) 010-0100`) are accepted.
+
+Incoming calls raise a critical-urgency notification — sent by the daemon, so it
+arrives even while the shell restarts — and, by default, open the panel. Clicking
+the notification opens the panel; it is replaced by "Missed call" if nobody answers,
+and withdrawn if someone does. Hovering the bar icon says what state the phone is
+in; a dot on it means missed calls you have not looked at yet. During a call, media
+players that were playing are paused and resumed afterwards.
+
+### Settings
+
+| Setting | Default | |
+|---|---|---|
+| Notify on incoming and missed calls | on | sent by the daemon |
+| Open the panel when a call comes in | on | |
+| Notify when the SIP registration is lost | on | after 30 s without registration, once it has worked |
+| Pause media players during calls | on | MPRIS players; only those it paused are resumed |
+| Show the call timer on the bar | off | horizontal bars |
+| Mark the bar icon when a call was missed | on | |
+| Recent calls to show | 5 | 0 hides the list |
+| Voicemail number | — | blank uses the one the server announces |
+| Echo cancellation | off | for speakers without a headset; restarts the daemon |
+| Status resync interval | 60 s | |
 
 The ring itself is a generated 400+450 Hz double-ring, written to
 `~/.config/omarchy-sip/ring.wav` on daemon start. baresip's bundled `ring.wav` is a
@@ -403,6 +429,19 @@ through the same pinned runtime-directory descriptor the daemon walks, and
 `read_lines()` bounds every record before anything is handed to QML, exactly as it
 already did for `omarchy-sip status`/`history`. The cost is one always-running child
 process where a raw socket would have needed none.
+
+### What arrives from the network
+
+Caller IDs, contact names and voicemail summaries are chosen by whoever sends them.
+Every `Text` in the panel is `Text.PlainText`. The notification server renders
+markup, so the daemon escapes, flattens and clips everything it puts in a
+notification. A SIP Call-ID reaches baresip's command line only for Do Not Disturb's
+`hangup <id>`, and only when it matches a strict character class. Voicemail counts
+are clamped, and contacts, like every other file, are read through the pinned
+directory with a byte cap, an entry cap and clipped fields.
+
+A clicked `sip:`/`tel:` link is text from anywhere. It only ever fills the dial
+field, after passing the same grammar the daemon enforces, and never dials.
 
 ### Privileges
 
