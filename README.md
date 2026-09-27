@@ -234,7 +234,7 @@ Panel.qml ── omarchy-sip events (subprocess) ── control socket ── om
 
 The panel talks to that socket through `omarchy-sip` as a subprocess rather than
 connecting to it directly — `events` for the long-lived stream, `send` for
-dial/accept/hangup — which is covered under
+commands — which is covered under
 [Security notes](#the-control-plane) alongside why.
 
 `Model.js` holds every pure function (event mapping, URI completion, duration
@@ -242,7 +242,8 @@ formatting, and the one place that scrapes baresip's prose output). `Service.qml
 owns state and processes. `Panel.qml` is a view with no call state of its own.
 
 **Swapping the engine.** The QML only ever calls
-`omarchy-sip {events,status,dial,answer,hangup,account}` with JSON in and out.
+`omarchy-sip {events,status,send,history,account,contacts,option}` with JSON in and
+out.
 Replacing baresip with something else means reimplementing that contract; the QML
 does not change.
 
@@ -254,15 +255,20 @@ omarchy-sip start | stop | restart         control the daemon
 omarchy-sip status                         JSON: unit, account and baresip state
 omarchy-sip events                         stream the JSON event feed
 omarchy-sip dial <uri> | answer | hangup   call control
-omarchy-sip send <cmd> [params]            any baresip command, fire-and-forget
+omarchy-sip send <cmd> [params]            an allowed command, fire-and-forget
 omarchy-sip cmd  <cmd> [params]            ... and print the response
-omarchy-sip history [--limit N]            recent calls as JSON
-omarchy-sip account show | set | clear     account management
+omarchy-sip history [--limit N] [--mark-seen]   recent calls and the unseen-missed count
+omarchy-sip account show | set [--merge] | clear   account management
+omarchy-sip contacts [list | add <uri> --name N | remove <uri>]
+omarchy-sip option show | set <key> <on|off>     the daemon's own options
+omarchy-sip open <sip:/tel: link>          put a link in the panel's dial field
+omarchy-sip handler install | uninstall    make sip:/sips:/tel: links open the panel
 ```
 
-`send`/`cmd` reach every baresip command, which is handy for things the panel does
-not surface: `omarchy-sip cmd callstat`, `omarchy-sip cmd reginfo`,
-`omarchy-sip cmd listcalls`.
+`send`/`cmd` accept only the commands the daemon allows, each with its own
+parameter grammar: `dial`, `accept`, `hangup`, `mute yes|no`, `hold`, `resume`,
+`sndcode <digits>`, `transfer <uri>`, `reginfo` and `listcalls` — for example
+`omarchy-sip cmd reginfo`. Anything else is refused with "command not permitted".
 
 Environment overrides:
 
@@ -501,18 +507,21 @@ console.log(M.normalizeTarget("1001","sip:you@pbx.example.com"));'
 ./tests/run
 ```
 
-Three dependency-free suites: `tests/model_test.js` covers every pure function in
-`Model.js` (event mapping, URI completion, the registration-status scraping, relative
-times), `tests/tracker_test.py` covers the call log's made / received / missed
-classification, interleaved calls, the size cap and file permissions, and
-`tests/io_test.py` covers the file/descriptor discipline described under
+Four dependency-free suites: `tests/model_test.js` covers every pure function in
+`Model.js` (event mapping, URI completion, the registration-status scraping, contact
+matching, voicemail parsing, relative times), `tests/tracker_test.py` covers the call
+log's made / received / missed classification, interleaved calls, the size cap, file
+permissions and the unseen-missed count, `tests/daemon_test.py` covers what the
+daemon decides by itself — notifications, Do Not Disturb, contacts, links, echo
+cancellation — with fakes for the bus and the notifier, and `tests/io_test.py` covers the file/descriptor discipline described under
 [Security notes](#directories-and-descriptors) — each case swaps a symlink, a FIFO,
 an intermediate directory or a hard link in for something the plugin expects to own,
 and asserts it fails, clips, or lands on the pinned object rather than following,
 blocking, or buffering without limit.
 
-`qmllint` cannot resolve the shell's `Panel` type and exits 255 with no output on
-this plugin *and* on the first-party ones, so it is not a useful gate here.
+`/usr/lib/qt6/bin/qmllint` is a syntax check only: it cannot import `qs.Ui` or
+`qs.Commons`, so it prints warnings about every shell type and still exits 0. Exit
+255 means a parse error; a clean exit proves nothing else.
 
 ## License
 
