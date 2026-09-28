@@ -455,5 +455,58 @@ bus.conn = FakeConn([signal_from(":1.66", "event", "sss", ("a", "b", '{"type":"S
 check("baresip events are taken only from the baresip we started",
       list(bus.pump()) == [("event", '{"type":"REGISTER_OK"}')])
 
+# ------------------------------------------------------ mimeapps.list
+
+H = mod.HANDLER
+check("install into an empty file adds the section",
+      mod.edit_mimeapps("", True) == "[Default Applications]\n" + "".join(
+          f"x-scheme-handler/{x}={H};\n" for x in ("sip", "sips", "tel")))
+existing = ("[Added Associations]\ntext/plain=nvim.desktop;\n\n[Default Applications]\n"
+            "x-scheme-handler/tel=other.desktop;\ntext/html=firefox.desktop\n")
+installed = mod.edit_mimeapps(existing, True)
+check("install puts ours first and keeps the old default as a fallback",
+      f"x-scheme-handler/tel={H};other.desktop;" in installed)
+check("...and leaves every other line alone",
+      "text/plain=nvim.desktop;" in installed and "text/html=firefox.desktop" in installed
+      and installed.startswith("[Added Associations]"))
+check("install twice changes nothing", mod.edit_mimeapps(installed, True) == installed)
+removed = mod.edit_mimeapps(installed, False)
+check("uninstall removes only ours",
+      "x-scheme-handler/tel=other.desktop;" in removed and H not in removed and "text/html" in removed)
+check("uninstall with nothing to remove is a no-op", mod.edit_mimeapps(existing, False) == existing)
+
+mh = tempfile.mkdtemp()
+os.makedirs(os.path.join(mh, ".config"), 0o755)
+os.makedirs(os.path.join(mh, "conf"), 0o700)
+secret = os.path.join(mh, "conf", "accounts")
+open(secret, "w").write("secret\n")
+
+
+def handler(*args):
+    env = {"HOME": mh, "PATH": "/usr/bin:/bin", "OMARCHY_SIP_CONF": os.path.join(mh, "conf"),
+           "XDG_RUNTIME_DIR": mh}
+    return subprocess.run([sys.executable, "-I", CLI, "handler", *args], env=env,
+                          capture_output=True, timeout=20)
+
+
+mimeapps = os.path.join(mh, ".config", "mimeapps.list")
+os.link(secret, mimeapps + ".new")     # xdg-mime's temp name, planted as a hard link
+r = handler("install")
+check("handler install writes mimeapps.list itself", r.returncode == 0
+      and f"x-scheme-handler/sip={H};" in open(mimeapps).read())
+check("...never through a planted hard link", open(secret).read() == "secret\n")
+check("...and writes the desktop entry",
+      os.path.exists(os.path.join(mh, ".local/share/applications", H)))
+r = handler("uninstall")
+check("handler uninstall removes the entry and our defaults",
+      r.returncode == 0 and H not in open(mimeapps).read()
+      and not os.path.exists(os.path.join(mh, ".local/share/applications", H)))
+os.unlink(mimeapps)
+os.symlink(secret, mimeapps)            # a dotfiles-style symlink
+r = handler("install")
+check("a symlinked mimeapps.list is not followed or replaced",
+      r.returncode != 0 and os.path.islink(mimeapps) and open(secret).read() == "secret\n"
+      and b"yourself" in r.stderr)
+
 print("\nall passed" if not fails else f"\n{fails} FAILED")
 sys.exit(1 if fails else 0)

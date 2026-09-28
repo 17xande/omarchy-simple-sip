@@ -177,9 +177,16 @@ They are stored in baresip's own format in `~/.config/omarchy-sip/contacts`
 panel with the number already in the dial field:
 
 ```bash
-omarchy-sip handler install      # writes ~/.local/share/applications/omarchy-sip-handler.desktop
-omarchy-sip handler uninstall    # removes it (uninstall does too)
+omarchy-sip handler install      # desktop entry + the defaults in ~/.config/mimeapps.list
+omarchy-sip handler uninstall    # removes both (uninstall does too)
 ```
+
+`install` writes `~/.local/share/applications/omarchy-sip-handler.desktop` and sets
+it as the default for the three schemes in `~/.config/mimeapps.list`, keeping any
+previous default after it as a fallback and every other line as it was. It edits that
+file itself rather than running `xdg-mime`, which rewrites it by pathname, following
+links and truncating in place. If `mimeapps.list` is a symlink (a dotfiles setup) it
+is left alone, and `install` prints the three lines to add yourself.
 
 A link never dials by itself; you press Enter. A web page should not be able to
 place a call, to a premium-rate number or anywhere else, because of one stray

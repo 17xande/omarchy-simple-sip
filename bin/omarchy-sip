@@ -92,6 +92,8 @@ RUN_DIR = os.path.join(
 )
 UNIT_DIR = os.path.join(HOME, ".config/systemd/user")
 APPS_DIR = os.path.join(HOME, ".local/share/applications")
+MIMEAPPS_DIR = os.path.join(HOME, ".config")
+MIMEAPPS = "mimeapps.list"
 HANDLER = "omarchy-sip-handler.desktop"
 HANDLER_SCHEMES = ("sip", "sips", "tel")
 
@@ -136,7 +138,6 @@ def trusted_bin(name: str) -> str | None:
 PYTHON = trusted_bin("python3") or sys.executable
 SYSTEMCTL = trusted_bin("systemctl") or "/usr/bin/systemctl"
 BARESIP = trusted_bin("baresip")
-XDG_MIME = trusted_bin("xdg-mime")
 
 # ------------------------------------------------------------------- ceilings
 #
@@ -2267,11 +2268,16 @@ def apps_fd() -> int:
 
 def handler_text() -> str:
     # Absolute, isolated interpreter, like the unit. Exec is unescaped twice
-    # (key-file backslashes, then exec quoting) and `%` is a field code, so a
-    # path carrying any of those is refused rather than escaped twice over.
+    # (key-file backslashes, then exec quoting), `%` is a field code, and a
+    # CR or LF would end the key; a path carrying any of those, or one that
+    # is not valid UTF-8, is refused rather than escaped twice over.
     for path in (PYTHON, SELF):
-        if re.search(r'["\\$`%\n]', path):
+        if re.search(r'["\\$`%\r\n]', path):
             die(f"cannot write a desktop entry for this path: {path!r}")
+        try:
+            path.encode("utf-8")
+        except UnicodeEncodeError:
+            die("cannot write a desktop entry for a path that is not UTF-8")
 
     def quote(arg: str) -> str:
         return f'"{arg}"'
@@ -2287,30 +2293,123 @@ def handler_text() -> str:
     )
 
 
-def xdg_mime(*args: str) -> int:
-    if XDG_MIME is None:
-        return -1
+# ~/.config/mimeapps.list is edited here rather than by running xdg-mime: that
+# is a shell script which resolves the file through realpath, `touch`es it and
+# rewrites it with `awk > file.new && mv` -- by pathname, following links and
+# truncating in place, which is everything the rest of this helper refuses to
+# do with a file the user owns. Only the [Default Applications] lines for our
+# three schemes are touched; every other byte is kept.
+MAX_MIMEAPPS = 256 * 1024
+_SCHEME_KEYS = tuple(f"x-scheme-handler/{s}" for s in HANDLER_SCHEMES)
+
+
+def edit_mimeapps(text: str, install: bool) -> str:
+    """`text` with our scheme defaults set (install) or removed (uninstall).
+
+    Values are ;-separated lists of desktop ids. Installing puts ours first
+    and keeps the rest as fallbacks; uninstalling removes only ours.
+    """
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    section = None
+    start = end = None
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if section == "[Default Applications]":
+                end = i
+            section = stripped
+            if section == "[Default Applications]" and start is None:
+                start = i
+    if start is not None and end is None:
+        end = len(lines)
+    if start is None:
+        if not install:
+            return text
+        if lines and lines[-1].strip():
+            lines.append("")
+        lines.append("[Default Applications]")
+        start = end = len(lines) - 1
+        end += 1
+    body = lines[start + 1 : end]
+    seen = set()
+    out = []
+    for line in body:
+        key, sep, value = line.partition("=")
+        key = key.strip()
+        if sep and key in _SCHEME_KEYS:
+            seen.add(key)
+            ids = [v.strip() for v in value.split(";") if v.strip() and v.strip() != HANDLER]
+            if install:
+                ids.insert(0, HANDLER)
+            if ids:
+                out.append(f"{key}={';'.join(ids)};")
+            continue
+        out.append(line)
+    if install:
+        for key in _SCHEME_KEYS:
+            if key not in seen:
+                out.append(f"{key}={HANDLER};")
+    lines[start + 1 : end] = out
+    return "\n".join(lines) + "\n"
+
+
+def update_mimeapps(install: bool) -> None:
+    config = os.environ.get("XDG_CONFIG_HOME") or MIMEAPPS_DIR
+    if not os.path.isabs(config):
+        config = MIMEAPPS_DIR
+    fd = dir_fd_for(config, 0o755, owned=False)
+    lines = "\n".join(f"  {k}={HANDLER};" for k in _SCHEME_KEYS)
+    manual = f"add these under [Default Applications] in {config}/{MIMEAPPS} yourself:\n{lines}"
+    mode = 0o644
     try:
-        return subprocess.run([XDG_MIME, *args], env=child_env(), timeout=15,
-                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode
-    except subprocess.TimeoutExpired:
-        return -1
+        rfd = open_checked(MIMEAPPS, os.O_RDONLY, dir_fd=fd)
+    except FileNotFoundError:
+        text = ""
+    except OSError as exc:
+        # Most often a dotfiles symlink: not ours to follow or replace.
+        die(f"not editing {config}/{MIMEAPPS} ({exc.strerror or exc}) -- {manual}")
+    else:
+        try:
+            st = os.fstat(rfd)
+            mode = stat.S_IMODE(st.st_mode) & 0o644 or 0o644
+            data = os.read(rfd, MAX_MIMEAPPS + 1)
+        finally:
+            os.close(rfd)
+        if len(data) > MAX_MIMEAPPS:
+            die(f"{config}/{MIMEAPPS} is larger than expected -- {manual}")
+        text = data.decode("utf-8", "strict") if data else ""
+    edited = edit_mimeapps(text, install)
+    if edited != text:
+        write_file(MIMEAPPS, edited, fd, mode)
 
 
 def remove_handler() -> bool:
+    """Take the desktop entry and our mimeapps defaults away. Never creates a
+    directory just to find nothing in it, and never dies half-way: uninstall
+    calls this after the unit is already gone."""
+    removed = False
+    if os.path.isdir(APPS_DIR) and not os.path.islink(APPS_DIR):
+        try:
+            os.unlink(HANDLER, dir_fd=apps_fd())
+            removed = True
+        except (OSError, SystemExit):
+            pass
     try:
-        os.unlink(HANDLER, dir_fd=apps_fd())
-        return True
-    except OSError:
-        return False
+        update_mimeapps(install=False)
+    except (OSError, SystemExit, UnicodeDecodeError):
+        pass
+    return removed
 
 
 def cmd_handler(args) -> int:
     if args.action == "install":
         write_file(HANDLER, handler_text(), apps_fd(), 0o644)
-        mimes = [f"x-scheme-handler/{s}" for s in HANDLER_SCHEMES]
-        if xdg_mime("default", HANDLER, *mimes) != 0:
-            die("wrote the handler, but xdg-mime could not make it the default")
+        try:
+            update_mimeapps(install=True)
+        except UnicodeDecodeError:
+            die("mimeapps.list is not UTF-8 -- not editing it")
         print(f"omarchy-sip: {', '.join(s + ':' for s in HANDLER_SCHEMES)} links now open the panel")
     else:
         removed = remove_handler()
