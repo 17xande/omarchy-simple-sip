@@ -342,5 +342,118 @@ mod.ensure_config()
 check("turning it off removes it", "webrtc_aec" not in open(os.path.join(aec_dir, "config")).read())
 mod.CONF_DIR = orig_conf
 
+# ------------------------------------------------- D-Bus sender binding
+
+from jeepney import DBusAddress, new_signal, new_method_call, new_method_return
+from jeepney.low_level import HeaderFields
+
+
+class FakeSock:
+    def __init__(self):
+        self.closed = False
+
+    def recv(self, n):
+        return b"x"
+
+    def fileno(self):
+        return 99
+
+
+class FakeParser:
+    def __init__(self, messages):
+        self.messages = list(messages)
+
+    def add_data(self, data):
+        pass
+
+    def get_next_message(self):
+        return self.messages.pop(0) if self.messages else None
+
+
+class FakeConn:
+    def __init__(self, messages):
+        self.sock = FakeSock()
+        self.parser = FakeParser(messages)
+
+    def close(self):
+        pass
+
+
+N = DBusAddress(mod.NOTIFY_PATH, bus_name=mod.NOTIFY_NAME, interface=mod.NOTIFY_NAME)
+
+
+def signal_from(sender, member, signature, body, addr=N):
+    msg = new_signal(addr, member, signature, body)
+    msg.header.fields[HeaderFields.sender] = sender
+    return msg
+
+
+def notify_reply(sender, serial, nid):
+    call = new_method_call(N, "Notify", "s", ("x",))
+    call.header.serial = serial
+    msg = new_method_return(call, "u", (nid,))
+    msg.header.fields[HeaderFields.sender] = sender
+    return msg
+
+
+def notifier(messages, owner=":1.5"):
+    nt = mod.Notifier.__new__(mod.Notifier)
+    nt.pending, nt.ids, nt.close_on_reply = {}, {}, set()
+    nt.owner, nt.on_close = owner, None
+    nt.conn = FakeConn(messages)
+    return nt
+
+
+nt = notifier([signal_from(":1.99", "ActionInvoked", "us", (7, "answer"))])
+nt.ids["call:A"] = 7
+check("an ActionInvoked from anyone but the server is ignored", list(nt.pump()) == [])
+nt = notifier([signal_from(":1.5", "ActionInvoked", "us", (7, "answer"))])
+nt.ids["call:A"] = 7
+check("...and one from the server is acted on", list(nt.pump()) == [("call:A", "answer")])
+nt = notifier([signal_from(":1.5", "ActionInvoked", "ss", ("7", "answer"))])
+nt.ids["call:A"] = 7
+try:
+    got = list(nt.pump())
+    check("a malformed signal is ignored, not a crash", got == [])
+except Exception as exc:
+    check(f"a malformed signal is ignored, not a crash ({exc!r})", False)
+
+D = DBusAddress("/org/freedesktop/DBus", bus_name="org.freedesktop.DBus", interface="org.freedesktop.DBus")
+nt = notifier([signal_from("org.freedesktop.DBus", "NameOwnerChanged", "sss",
+                           (mod.NOTIFY_NAME, ":1.5", ":1.77"), D)])
+nt.ids["call:A"] = 7
+list(nt.pump())
+check("a new notification server means the old ids are forgotten", nt.ids == {} and nt.owner == ":1.77")
+nt = notifier([signal_from(":1.66", "NameOwnerChanged", "sss", (mod.NOTIFY_NAME, ":1.5", ":1.66"), D)])
+list(nt.pump())
+check("...but only when the bus itself says so", nt.owner == ":1.5")
+
+nt = notifier([notify_reply(":1.8", 41, 3)])
+nt.ids["call:old"] = 3
+nt.pending[41] = "call:new"
+list(nt.pump())
+check("a Notify answered by a different server resets the ids first",
+      nt.ids == {"call:new": 3} and nt.owner == ":1.8")
+
+nt = notifier([notify_reply(":1.5", 1000 + i, i) for i in range(100)])
+for i in range(100):
+    nt.pending[1000 + i] = f"call:{i}"
+list(nt.pump())
+check("ids are capped", len(nt.ids) == mod.Notifier.MAX_IDS and "call:99" in nt.ids)
+
+closed_fds = []
+nt = notifier([])
+nt.on_close = closed_fds.append
+nt.close()
+check("closing the notifier unregisters its descriptor at once", closed_fds == [99])
+
+B = DBusAddress(mod.DBUS_PATH, bus_name=mod.DBUS_NAME, interface=mod.DBUS_NAME)
+bus = mod.BaresipBus.__new__(mod.BaresipBus)
+bus.owner, bus.pending = ":1.20", {}
+bus.conn = FakeConn([signal_from(":1.66", "event", "sss", ("a", "b", '{"type":"SHOW_PANEL"}'), B),
+                     signal_from(":1.20", "event", "sss", ("a", "b", '{"type":"REGISTER_OK"}'), B)])
+check("baresip events are taken only from the baresip we started",
+      list(bus.pump()) == [("event", '{"type":"REGISTER_OK"}')])
+
 print("\nall passed" if not fails else f"\n{fails} FAILED")
 sys.exit(1 if fails else 0)

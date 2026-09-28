@@ -60,6 +60,8 @@ try:
     from jeepney.low_level import HeaderFields
     HEADER_MEMBER = HeaderFields.member
     HEADER_REPLY_SERIAL = HeaderFields.reply_serial
+    HEADER_SENDER = HeaderFields.sender
+    HEADER_SIGNATURE = HeaderFields.signature
 except ImportError:   # reported properly by cmd_daemon; the CLI still runs
     open_dbus_connection = None
 
@@ -1191,11 +1193,19 @@ class BaresipBus:
         self.conn = open_dbus_connection(bus="SESSION")
         self.conn.sock.setblocking(False)
         self.pending: dict[int, str] = {}     # method-call serial -> client token
-        rule = MatchRule(type="signal", interface=DBUS_NAME, path=DBUS_PATH)
         blocking = self.conn.sock.gettimeout()
         self.conn.sock.setblocking(True)
         try:
-            self.conn.send_and_get_reply(message_bus.AddMatch(rule))
+            # Bind to the baresip we started, by its unique bus name. Any
+            # session-bus client can emit a signal with baresip's interface
+            # and path; without a sender, a forged `event` would be
+            # forwarded to every panel as if baresip had said it.
+            reply = self.conn.send_and_get_reply(message_bus.GetNameOwner(DBUS_NAME), timeout=5)
+            self.owner = str(reply.body[0]) if reply.body else ""
+            if not self.owner.startswith(":"):
+                raise ConnectionError(f"{DBUS_NAME} has no owner")
+            rule = MatchRule(type="signal", sender=self.owner, interface=DBUS_NAME, path=DBUS_PATH)
+            self.conn.send_and_get_reply(message_bus.AddMatch(rule), timeout=5)
         finally:
             self.conn.sock.settimeout(blocking)
             self.conn.sock.setblocking(False)
@@ -1241,11 +1251,17 @@ class BaresipBus:
             if msg is None:
                 return
             mtype = msg.header.message_type
+            sender = msg.header.fields.get(HEADER_SENDER)
             if mtype is MessageType.signal:
+                if sender != self.owner:
+                    continue      # not our baresip: the match rule should not let it through
                 member = msg.header.fields.get(HEADER_MEMBER)
                 if member == "event" and len(msg.body) >= 3:
                     yield ("event", str(msg.body[2]))
             elif mtype in (MessageType.method_return, MessageType.error):
+                # From baresip, or the bus refusing on its behalf.
+                if sender not in (self.owner, "org.freedesktop.DBus"):
+                    continue
                 reply_to = msg.header.fields.get(HEADER_REPLY_SERIAL)
                 token = self.pending.pop(reply_to, None)
                 if token is None:
@@ -1295,15 +1311,41 @@ class Notifier:
         self.conn = None
         self.addr = DBusAddress(NOTIFY_PATH, bus_name=NOTIFY_NAME, interface=NOTIFY_NAME)
         self.pending: dict[int, str] = {}   # Notify serial -> key
-        self.ids: dict[str, int] = {}       # key -> server id
+        self.ids: dict[str, int] = {}       # key -> server id, of the current server
         self.close_on_reply: set[str] = set()
+        # The notification server's unique bus name. Its signals are trusted
+        # only from it -- any client can emit ActionInvoked -- and its ids
+        # mean nothing once it is replaced: the Omarchy shell *is* the
+        # server, and a restarted shell hands out the same small numbers to
+        # other apps' notifications.
+        self.owner: str | None = None
+        self.on_close = None     # called with the descriptor number on close
         try:
             self.conn = open_dbus_connection(bus="SESSION")
             rule = MatchRule(type="signal", interface=NOTIFY_NAME, path=NOTIFY_PATH)
             self.conn.send_and_get_reply(message_bus.AddMatch(rule), timeout=5)
+            owner_rule = MatchRule(type="signal", sender="org.freedesktop.DBus",
+                                   interface="org.freedesktop.DBus", member="NameOwnerChanged",
+                                   path="/org/freedesktop/DBus")
+            owner_rule.add_arg_condition(0, NOTIFY_NAME)
+            self.conn.send_and_get_reply(message_bus.AddMatch(owner_rule), timeout=5)
+            try:
+                reply = self.conn.send_and_get_reply(message_bus.GetNameOwner(NOTIFY_NAME), timeout=5)
+                if reply.body and str(reply.body[0]).startswith(":"):
+                    self.owner = str(reply.body[0])
+            except Exception:
+                pass      # no server right now (the shell restarting); learnt later
             self.conn.sock.setblocking(False)
         except Exception:
             self.close()
+
+    MAX_IDS = 64
+
+    def forget_server(self, owner: str | None) -> None:
+        """A different server now: its ids are not ours."""
+        self.ids.clear()
+        self.close_on_reply.clear()
+        self.owner = owner
 
     def fileno(self) -> int:
         return self.conn.sock.fileno() if self.conn else -1
@@ -1315,6 +1357,8 @@ class Notifier:
         serial = next(self.conn.outgoing_serial)
         try:
             self.conn.send(msg, serial=serial)
+        except BlockingIOError:
+            return None       # the bus is backed up: drop this one, keep the connection
         except OSError:
             self.close()
             return None
@@ -1362,22 +1406,35 @@ class Notifier:
             if msg is None:
                 return
             mtype = msg.header.message_type
+            fields = msg.header.fields
+            sender = fields.get(HEADER_SENDER)
+            signature = fields.get(HEADER_SIGNATURE, "")
+            member = fields.get(HEADER_MEMBER)
             if mtype in (MessageType.method_return, MessageType.error):
-                key = self.pending.pop(msg.header.fields.get(HEADER_REPLY_SERIAL), None)
-                if key is None or mtype is MessageType.error or not msg.body:
+                key = self.pending.pop(fields.get(HEADER_REPLY_SERIAL), None)
+                if key is None or mtype is MessageType.error or signature != "u":
                     continue
+                if sender != self.owner:
+                    self.forget_server(sender)     # whoever answered Notify is the server now
+                if len(self.ids) >= self.MAX_IDS and key not in self.ids:
+                    self.ids.pop(next(iter(self.ids)))
                 self.ids[key] = int(msg.body[0])
                 if key in self.close_on_reply:
                     self.close_on_reply.discard(key)
                     self.close_key(key)
             elif mtype is MessageType.signal:
-                member = msg.header.fields.get(HEADER_MEMBER)
-                if member == "ActionInvoked" and len(msg.body) >= 2:
+                if member == "NameOwnerChanged" and sender == "org.freedesktop.DBus":
+                    if signature == "sss" and msg.body[0] == NOTIFY_NAME:
+                        self.forget_server(str(msg.body[2]) or None)
+                    continue
+                if sender is None or sender != self.owner:
+                    continue      # anyone can emit these; only the server's count
+                if member == "ActionInvoked" and signature == "us":
                     nid, action = int(msg.body[0]), str(msg.body[1])
                     for key, known in list(self.ids.items()):
                         if known == nid:
                             yield key, action
-                elif member == "NotificationClosed" and msg.body:
+                elif member == "NotificationClosed" and signature == "uu":
                     nid = int(msg.body[0])
                     for key, known in list(self.ids.items()):
                         if known == nid:
@@ -1386,9 +1443,21 @@ class Notifier:
     def close(self) -> None:
         if self.conn is not None:
             try:
+                fd = self.conn.sock.fileno()
+            except OSError:
+                fd = -1
+            try:
                 self.conn.close()
             except OSError:
                 pass
+            self.conn = None
+            # Unregister now, not at the end of the loop iteration: a client
+            # accepted later in the same pass could already reuse the number.
+            if self.on_close is not None and fd >= 0:
+                try:
+                    self.on_close(fd)
+                except (KeyError, ValueError):
+                    pass
         self.conn = None
 
 
@@ -1677,8 +1746,13 @@ def cmd_daemon(_args) -> int:
     sel = selectors.DefaultSelector()
     sel.register(bus.fileno(), selectors.EVENT_READ, "bus")
     sel.register(hub.sock, selectors.EVENT_READ, "listen")
+    # The notifier can close itself from any call (a failed send in
+    # alerts.handle, say); it unregisters itself as it does, since a stale
+    # entry would collide with the next accepted client that reuses the
+    # descriptor number and KeyError out of the loop.
     if notifier.fileno() >= 0:
         sel.register(notifier.fileno(), selectors.EVENT_READ, "notify")
+        notifier.on_close = sel.unregister
 
     try:
         while True:
@@ -1732,10 +1806,15 @@ def cmd_daemon(_args) -> int:
                                 separators=(",", ":"),
                             ))
                 elif key.data == "notify":
-                    for nkey, action in list(notifier.pump()):
+                    try:
+                        actions = list(notifier.pump())
+                    except Exception:
+                        # A message we cannot make sense of: no notifications
+                        # rather than a daemon (and the call) going down.
+                        notifier.close()
+                        actions = []
+                    for nkey, action in actions:
                         alerts.action(nkey, action)
-                    if notifier.conn is None:
-                        sel.unregister(key.fileobj)
                 elif key.data == "listen":
                     conn = hub.accept()
                     if conn is not None:
