@@ -484,7 +484,14 @@ sends them.
 - **One call at a time** is enforced (`call_max_calls 1`): a second INVITE is refused
   with 486 before a call exists. Otherwise it would become baresip's "current call",
   and accept, mute, hold, tones and transfer — which act on the current call — would
-  act on the newcomer.
+  act on the newcomer. A refused second call leaves no trace: it is not logged or
+  notified.
+- The far end cannot make baresip dial. Accounts are written with
+  `call_transfer=no`, so a remote REFER is not followed, and the daemon hangs up, by
+  its id, any call that appears while another is up, whatever placed it.
+- A D-Bus message the parser rejects — anyone on the session bus can send one to the
+  daemon — replaces that connection rather than ending the daemon, and with it the
+  call. Only a flood (more than five a minute) still ends it.
 - Accept, hang up, hold and resume name their call by its Call-ID, which reaches
   baresip's command line only when it is printable ASCII without space, `=`, `;`,
   quotes or backslash. A notification button for a call that cannot be named does

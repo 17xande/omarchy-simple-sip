@@ -575,16 +575,19 @@ def parse_account_line(line: str) -> dict:
         rest = ";" + rest
     params: dict[str, str] = {}
     raw: list[str] = []
-    for field in rest.split(";")[1:33]:
+    fields = rest.split(";")[1:]
+    truncated = len(fields) > 32
+    for field in fields[:32]:
         key, _, value = field.partition("=")
         key = key.strip()
         if key:
             # Quotes are the grammar's, not the value's; whitespace is kept --
             # a password that ends in a space is a password that ends in a space.
-            params[clip(key, 64)] = clip(value.strip('"'), MAX_ACCOUNT_FIELD)
+            # Keys are lower-cased, as baresip matches them; the first wins.
+            params.setdefault(clip(key.lower(), 64), clip(value.strip('"'), MAX_ACCOUNT_FIELD))
             raw.append(field)
     return {"display": clip(display, MAX_ACCOUNT_FIELD), "uri": clip(uri.strip()),
-            "params": params, "raw": raw}
+            "params": params, "raw": raw, "truncated": truncated}
 
 
 def account_entry() -> dict | None:
@@ -1014,6 +1017,17 @@ def sip_address(text: str) -> str:
     return uri if CONTACT_URI.match(uri) else ""
 
 
+def contact_address(line: str) -> str:
+    """The part of a contacts line after its quoted display name -- which
+    may itself contain `<` or `>` -- exactly as parse_contacts and baresip
+    read it."""
+    line = line.strip()
+    if line.startswith('"'):
+        end = line.find('"', 1)
+        return line[end + 1 :].strip() if end > 0 else ""
+    return line
+
+
 def parse_contacts(text: str) -> list[dict]:
     """baresip's contacts file -- `"Name" <sip:uri>;params`, one per line --
     as [{name, uri}]. Bounded: at most MAX_CONTACTS entries, names clipped,
@@ -1282,8 +1296,9 @@ class BaresipBus:
         try:
             self.conn.send(msg, serial=serial)
         except OSError:
+            # Backed up or gone: this command is lost, not the daemon. A dead
+            # connection shows up at the next pump(), which reconnects.
             self.pending.pop(serial, None)
-            raise
 
     def pump(self):
         """Drain the socket, yielding ("event", json) / ("reply", token, text).
@@ -1516,6 +1531,7 @@ class Notifier:
 
 
 REG_ALERT_AFTER = 30.0   # seconds of lost registration before we say so
+RECONNECT_BURST = 5      # D-Bus reconnects allowed a minute before giving up
 
 # A SIP Call-ID is chosen by whoever places the call, and `accept`/`hangup`/
 # `hold`/`resume` take it as the first token of a command line (baresip's
@@ -1548,6 +1564,24 @@ def dnd_reject(event: dict, options: dict, tracker, invoke) -> bool:
         return False     # rings through, and is logged and notified as any call
     invoke(f"hangup {call_id} scode=480")
     tracker.mark_dnd(call_id)
+    return True
+
+
+def second_call(event: dict, tracker, invoke) -> bool:
+    """End any call that starts while another is up. call_max_calls 1 stops a
+    second INVITE, but not a call baresip places itself -- for a remote REFER,
+    say, where the far end names a URI and baresip dials it on the user's
+    account while the first call stays up. One call at a time is the rule the
+    panel is built on, so the newcomer is hung up by its own id and never
+    shown. Returns whether it did."""
+    if event.get("type") not in ("CALL_OUTGOING", "CALL_INCOMING"):
+        return False
+    call_id = str(event.get("id") or "")
+    if len(tracker.open_calls) <= 1 or call_id not in tracker.open_calls:
+        return False
+    if call_id_ok(call_id):
+        invoke(f"hangup {call_id}")
+    tracker.open_calls.pop(call_id, None)   # not a call of ours; nothing to log
     return True
 
 
@@ -1813,6 +1847,37 @@ def cmd_daemon(_args) -> int:
         sel.register(notifier.fileno(), selectors.EVENT_READ, "notify")
         notifier.on_close = sel.unregister
 
+    # A message the D-Bus parser rejects -- any session-bus client can send
+    # one to our unique name, before any sender check can run -- leaves the
+    # connection's stream untrustworthy. Exiting would terminate baresip and
+    # drop the call, so the connection is replaced instead; only a flood of
+    # them (more than RECONNECT_BURST a minute) still ends the daemon.
+    reconnects: list[float] = []
+
+    def may_reconnect() -> bool:
+        now = time.monotonic()
+        reconnects[:] = [t for t in reconnects if now - t < 60] + [now]
+        return len(reconnects) <= RECONNECT_BURST
+
+    def reconnect_bus():
+        nonlocal bus
+        try:
+            sel.unregister(bus.fileno())
+        except (KeyError, ValueError, OSError):
+            pass
+        bus.close()
+        bus = BaresipBus()
+        sel.register(bus.fileno(), selectors.EVENT_READ, "bus")
+
+    def reconnect_notifier():
+        nonlocal notifier
+        notifier.close()          # unregisters itself
+        notifier = Notifier()
+        alerts.notifier = notifier
+        if notifier.fileno() >= 0:
+            sel.register(notifier.fileno(), selectors.EVENT_READ, "notify")
+            notifier.on_close = sel.unregister
+
     try:
         while True:
             if baresip.poll() is not None:
@@ -1826,11 +1891,15 @@ def cmd_daemon(_args) -> int:
                         journal({"type": "CTRL_DISCONNECTED", "reason": str(exc)})
                         return 1
                     except Exception as exc:
-                        # A message we cannot parse means the stream is no
-                        # longer trustworthy; let systemd restart us rather
-                        # than guess where the next one begins.
-                        journal({"type": "CTRL_FAILED", "reason": f"bad message: {exc}"})
-                        return 1
+                        if not may_reconnect():
+                            journal({"type": "CTRL_FAILED", "reason": f"bad messages: {exc}"})
+                            return 1
+                        try:
+                            reconnect_bus()
+                        except Exception as again:
+                            journal({"type": "CTRL_FAILED", "reason": f"reconnect failed: {again}"})
+                            return 1
+                        break     # the selector changed under this iteration
                     for item in items:
                         if item[0] == "event":
                             # baresip's own JSON, forwarded verbatim -- the
@@ -1846,6 +1915,8 @@ def cmd_daemon(_args) -> int:
                                 hub.broadcast(text)
                                 continue
                             tracker.handle(event)
+                            if second_call(event, tracker, lambda line: bus.invoke(line, "second-call")):
+                                continue
                             # A call turned away under Do Not Disturb never
                             # reaches the panels: nothing there to ring, open or
                             # offer Answer for. Its CALL_CLOSED still does.
@@ -1868,10 +1939,15 @@ def cmd_daemon(_args) -> int:
                     try:
                         actions = list(notifier.pump())
                     except Exception:
-                        # A message we cannot make sense of: no notifications
-                        # rather than a daemon (and the call) going down.
-                        notifier.close()
+                        # A message we cannot make sense of: a fresh
+                        # connection, rather than a daemon going down or
+                        # notifications off until the next restart.
                         actions = []
+                        if may_reconnect():
+                            reconnect_notifier()
+                        else:
+                            notifier.close()
+                        break
                     for nkey, action in actions:
                         alerts.action(nkey, action)
                 elif key.data == "listen":
@@ -2294,12 +2370,19 @@ def cmd_contacts(args) -> int:
     out, found = [], False
     for line in lines:
         stripped = line.strip()
-        if not stripped or stripped.startswith("#") or sip_address(stripped) != uri:
+        address = contact_address(stripped)
+        blocked = bool(re.search(r";\s*access\s*=\s*block\b", address.split(">", 1)[-1], re.I))
+        # A block line is baresip's call blocking, not the contact: removing
+        # or renaming a contact must never unblock a caller.
+        if not stripped or stripped.startswith("#") or blocked or sip_address(address) != uri:
             out.append(line)
+            continue
+        if found and args.action == "remove":
+            out.append(line)         # only the first matching contact line
             continue
         found = True
         if args.action == "add":
-            tail = stripped.split(">", 1)[1] if ">" in stripped else ""
+            tail = address.split(">", 1)[1] if ">" in address else ""
             out.append(contact_line({"name": name, "uri": uri}) + tail)
     if args.action == "add" and not found:
         if len(contacts) >= MAX_CONTACTS:
@@ -2336,7 +2419,9 @@ def link_target(url: str) -> str:
     # not something a web page gets to put in front of a person, even for
     # them to confirm.
     user = target.partition(":")[2] if ":" in target else target
-    if user.startswith(("*", "#")):
+    # Still-encoded characters are refused too: `%2A72` is `*72` to a PBX
+    # that decodes it, and a link that was encoded twice arrives that way.
+    if user.startswith(("*", "#")) or "%" in user:
         return ""
     return target if PREFILL_TARGET.fullmatch(target) else ""
 
@@ -2411,7 +2496,7 @@ def edit_mimeapps(text: str, install: bool) -> str:
     for i, line in enumerate(lines):
         stripped = line.strip()
         if stripped.startswith("[") and stripped.endswith("]"):
-            if section == "[Default Applications]":
+            if section == "[Default Applications]" and end is None:
                 end = i
             section = stripped
             if section == "[Default Applications]" and start is None:
@@ -2453,6 +2538,8 @@ def update_mimeapps(install: bool) -> None:
     config = os.environ.get("XDG_CONFIG_HOME") or MIMEAPPS_DIR
     if not os.path.isabs(config):
         config = MIMEAPPS_DIR
+    if not install and not os.path.isdir(config):
+        return       # nothing to remove, and nothing to create just to find that
     fd = dir_fd_for(config, 0o755, owned=False)
     lines = "\n".join(f"  {k}={HANDLER};" for k in _SCHEME_KEYS)
     manual = f"add these under [Default Applications] in {config}/{MIMEAPPS} yourself:\n{lines}"
@@ -2473,7 +2560,10 @@ def update_mimeapps(install: bool) -> None:
             os.close(rfd)
         if len(data) > MAX_MIMEAPPS:
             die(f"{config}/{MIMEAPPS} is larger than expected -- {manual}")
-        text = data.decode("utf-8", "strict") if data else ""
+        try:
+            text = data.decode("utf-8", "strict") if data else ""
+        except UnicodeDecodeError:
+            die(f"{config}/{MIMEAPPS} is not UTF-8 -- {manual}")
     edited = edit_mimeapps(text, install)
     if edited != text:
         write_file(MIMEAPPS, edited, fd, mode)
@@ -2675,11 +2765,19 @@ def cmd_account(args) -> int:
     # saving the form never quietly drops, say, mandatory SRTP. They come
     # from the file as whole `key=value` segments, which the line was split
     # on `;` to get, so they cannot contain one; a CR would end the line.
-    managed = {"auth_user", "auth_pass", "transport", "outbound", "answermode", "regint"}
+    # Compared case-insensitively: baresip's msg_param_decode is, and first
+    # match wins, so a carried-through "Outbound=" would still be used after
+    # the form cleared outbound.
+    managed = {"auth_user", "auth_pass", "transport", "outbound", "answermode", "regint",
+               "call_transfer"}
     extras = []
+    if current and current.get("truncated"):
+        # Reading keeps the first 32 fields; rewriting from that would drop
+        # the rest, so refuse instead.
+        die("the stored account has more than 32 fields -- edit accounts by hand")
     if current:
         for field in current.get("raw", []):
-            key = field.partition("=")[0].strip()
+            key = field.partition("=")[0].strip().lower()
             if key in managed or "\r" in field or "\n" in field:
                 continue
             if len(field) > MAX_ACCOUNT_FIELD * 2:
@@ -2701,7 +2799,11 @@ def cmd_account(args) -> int:
     entry += f";transport={transport}"
     if outbound:
         entry += f';outbound="{outbound}"'
-    entry += f";answermode=manual;regint={regint}"
+    # call_transfer=no: never dial on the far end's say-so. A remote REFER
+    # would otherwise have baresip place a second call, on this account, to
+    # a URI the other party chose. (Our own Transfer sends a REFER; it does
+    # not need this.)
+    entry += f";answermode=manual;regint={regint};call_transfer=no"
     if not any(f.partition("=")[0].strip() == "audio_codecs" for f in extras):
         entry += ";audio_codecs=opus/48000/2,PCMU/8000/1,PCMA/8000/1"
     entry += "".join(";" + f for f in extras)

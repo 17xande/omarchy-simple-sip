@@ -476,6 +476,18 @@ check("...keeps a custom codec list instead of the default",
       kept["params"].get("audio_codecs") == "opus/48000/2"
       and open(path("merge/accounts")).read().count("audio_codecs") == 1)
 check("...and keeps a password exactly, trailing space and all", kept["params"].get("auth_pass") == "pw ")
+with open(path("merge/accounts"), "w") as fh:
+    fh.write('<sip:1001@pbx.example.com>;auth_user=u;Outbound="sip:old.example.com";transport=udp\n')
+sip("account", "set", "--merge", "--outbound=", stdin=b"")
+merged = open(path("merge/accounts")).read()
+check("--merge matches keys as baresip does, ignoring case: a cleared outbound stays cleared",
+      "old.example.com" not in merged)
+check("every account written refuses the far end's transfer requests", ";call_transfer=no" in merged)
+with open(path("merge/accounts"), "w") as fh:
+    fh.write("<sip:1001@pbx.example.com>" + "".join(f";k{i}=v" for i in range(40)) + "\n")
+r = sip("account", "set", "--merge", stdin=b"")
+check("--merge refuses a line it could only read part of", r.returncode != 0
+      and open(path("merge/accounts")).read().count(";k") == 40)
 check("parse_account_line caps the fields it keeps",
       len(mod.parse_account_line("<sip:a@b>" + ";k%d=v" * 100 % tuple(range(100)))["params"]) == 32)
 check("parse_account_line clips an oversized value",

@@ -550,5 +550,64 @@ r = subprocess.run([sys.executable, "-I", CLI, "send", "--token=t", "--", "hangu
 check("after `--`, a parameter that looks like an option is a parameter",
       b"unrecognized" not in r.stderr and b"usage:" not in r.stderr + r.stdout)
 
+# ------------------------------------------------------ second review round
+
+tr = mod.CallTracker(dfd, "h3.jsonl")
+hung = []
+tr.handle({"type": "CALL_INCOMING", "id": "first", "peeruri": "sip:1@pbx"})
+check("a first call is left alone",
+      not mod.second_call({"type": "CALL_INCOMING", "id": "first"}, tr, hung.append) and hung == [])
+refer = {"type": "CALL_OUTGOING", "id": "refer2", "peeruri": "sip:+1900@evil.example"}
+tr.handle(refer)
+check("a second call -- a far end's REFER, say -- is hung up by its own id",
+      mod.second_call(refer, tr, hung.append) and hung == ["hangup refer2"])
+check("...and not tracked as a call of ours", "refer2" not in tr.open_calls and "first" in tr.open_calls)
+
+
+class DeadConn:
+    outgoing_serial = iter(range(1, 100))
+
+    def send(self, msg, serial=None):
+        raise BlockingIOError()
+
+
+bus2 = mod.BaresipBus.__new__(mod.BaresipBus)
+bus2.addr, bus2.pending, bus2.conn = B, {}, DeadConn()
+try:
+    bus2.invoke("hangup", "t")
+    check("a backed-up bus loses the command, not the daemon", bus2.pending == {})
+except OSError:
+    check("a backed-up bus loses the command, not the daemon", False)
+
+check("a still-encoded feature code in a link is refused",
+      mod.link_target("sip:%252A72@pbx.example.com") == "" and mod.link_target("tel:%25%32%41") == "")
+
+twice = ("[Default Applications]\ntext/html=a.desktop;\n[Added Associations]\n"
+         "x-scheme-handler/sip=keep.desktop;\n[Default Applications]\nimage/png=b.desktop;\n")
+edited = mod.edit_mimeapps(twice, True)
+check("a second [Default Applications] never pulls another group into the edit",
+      "[Added Associations]\nx-scheme-handler/sip=keep.desktop;" in edited
+      and edited.split("[Added Associations]")[0].count(f"x-scheme-handler/sip={H};") == 1)
+
+cq = tempfile.mkdtemp()
+os.chmod(cq, 0o700)
+os.mkdir(os.path.join(cq, "c"), 0o700)
+with open(os.path.join(cq, "c", "contacts"), "w") as fh:
+    fh.write('"Bob <sip:x@h>" <sip:alice@h>\n"Blocked" <sip:x@h>;access=block\n"X" <sip:x@h>\n')
+
+
+def cq_contacts(*args):
+    return subprocess.run([sys.executable, "-I", CLI, "contacts", *args], capture_output=True, timeout=20,
+                          env={"HOME": cq, "PATH": "/usr/bin:/bin", "XDG_RUNTIME_DIR": cq,
+                               "OMARCHY_SIP_CONF": os.path.join(cq, "c")})
+
+
+cq_contacts("remove", "sip:x@h")
+left = open(os.path.join(cq, "c", "contacts")).read()
+check("a quoted name containing an address is not taken for the line's address",
+      '"Bob <sip:x@h>" <sip:alice@h>' in left)
+check("removing a contact never removes the caller's block line",
+      '<sip:x@h>;access=block' in left and '"X" <sip:x@h>' not in left)
+
 print("\nall passed" if not fails else f"\n{fails} FAILED")
 sys.exit(1 if fails else 0)
