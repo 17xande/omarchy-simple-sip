@@ -204,8 +204,22 @@ for bad in ('Bob" <sip:evil@x>', "a<b", "a;b"):
     check(f"a name with {bad!r} is refused", r.returncode != 0)
 check("...and nothing was written", len(json.loads(contacts().stdout)) == 1)
 check("a non-sip address is refused", contacts("add", "tel:123", "--name", "x").returncode != 0)
+with open(os.path.join(cdir, "contacts"), "w") as fh:
+    fh.write('# my list\n"Spammer" <sip:spam@evil.example>;access=block\n'
+             '"Home" <tel:+15550100>\n"Old name" <sip:1001@pbx>;presence=p2p\n')
+check("a blocked caller is not listed as a contact",
+      [c["name"] for c in json.loads(contacts().stdout)] == ["Old name"])
+contacts("add", "sip:2002@pbx", "--name", "Alice")
+kept_text = open(os.path.join(cdir, "contacts")).read()
+check("adding a contact keeps baresip's call blocking", '<sip:spam@evil.example>;access=block' in kept_text)
+check("...and comments and tel: entries", "# my list" in kept_text and "<tel:+15550100>" in kept_text)
+contacts("add", "sip:1001@pbx", "--name", "New name")
+check("renaming keeps the line's parameters",
+      '"New name" <sip:1001@pbx>;presence=p2p' in open(os.path.join(cdir, "contacts")).read())
 r = contacts("remove", "sip:1001@pbx")
-check("contacts remove deletes it", r.returncode == 0 and json.loads(contacts().stdout) == [])
+check("contacts remove deletes it, and only it",
+      r.returncode == 0 and "sip:1001@pbx" not in [c["uri"] for c in json.loads(contacts().stdout)]
+      and "access=block" in open(os.path.join(cdir, "contacts")).read())
 check("removing an unknown contact says so", contacts("remove", "sip:1001@pbx").returncode != 0)
 check("the contacts file is private", oct(os.stat(os.path.join(cdir, "contacts")).st_mode & 0o777) == "0o600")
 

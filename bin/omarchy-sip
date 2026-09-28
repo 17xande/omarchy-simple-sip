@@ -470,6 +470,34 @@ def read_bounded(name: str, dir_fd: int, limit: int = MAX_FILE) -> str:
         os.close(fd)
 
 
+def read_exact(name: str, dir_fd: int, limit: int) -> str | None:
+    """The whole file as text, for rewriting it: None when it does not
+    exist. Unlike read_bounded, which clips and replaces undecodable bytes
+    -- fine for reading, lossy for a read-modify-write -- this refuses a file
+    over `limit` or one that is not UTF-8, so nothing is ever written back
+    that the user did not have."""
+    try:
+        fd = open_checked(name, os.O_RDONLY, dir_fd=dir_fd)
+    except FileNotFoundError:
+        return None
+    try:
+        chunks, got = [], 0
+        while got <= limit:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            got += len(chunk)
+    finally:
+        os.close(fd)
+    if got > limit:
+        die(f"{name} is larger than {limit} bytes -- not rewriting it")
+    try:
+        return b"".join(chunks).decode("utf-8")
+    except UnicodeDecodeError:
+        die(f"{name} is not UTF-8 -- not rewriting it")
+
+
 def write_file(name: str, content: str | bytes, dir_fd: int, mode: int = 0o600) -> None:
     """Write `name` by creating a fresh file and renaming it into place.
 
@@ -546,12 +574,17 @@ def parse_account_line(line: str) -> dict:
         uri, rest = line.split(";", 1)
         rest = ";" + rest
     params: dict[str, str] = {}
+    raw: list[str] = []
     for field in rest.split(";")[1:33]:
         key, _, value = field.partition("=")
         key = key.strip()
         if key:
-            params[clip(key, 64)] = clip(value.strip().strip('"'), MAX_ACCOUNT_FIELD)
-    return {"display": clip(display, MAX_ACCOUNT_FIELD), "uri": clip(uri.strip()), "params": params}
+            # Quotes are the grammar's, not the value's; whitespace is kept --
+            # a password that ends in a space is a password that ends in a space.
+            params[clip(key, 64)] = clip(value.strip('"'), MAX_ACCOUNT_FIELD)
+            raw.append(field)
+    return {"display": clip(display, MAX_ACCOUNT_FIELD), "uri": clip(uri.strip()),
+            "params": params, "raw": raw}
 
 
 def account_entry() -> dict | None:
@@ -608,7 +641,7 @@ def account_transport() -> str:
     no explicit transport= will use.
     """
     entry = account_entry()
-    value = (entry or {}).get("params", {}).get("transport", "").lower()
+    value = (entry or {}).get("params", {}).get("transport", "").strip().lower()
     return value if value in ("udp", "tcp", "tls") else "udp"
 
 
@@ -999,6 +1032,11 @@ def parse_contacts(text: str) -> list[dict]:
             name, line = line[1:end], line[end + 1 :].strip()
         uri = sip_address(line)
         if not uri:
+            continue
+        # baresip's call blocking (`;access=block`) is a contact line too, but
+        # not someone to call: it is kept in the file and left out of the list.
+        tail = line.split(">", 1)[1] if ">" in line else ""
+        if re.search(r";\s*access\s*=\s*block\b", tail, re.IGNORECASE):
             continue
         out.append({"name": clip(name, MAX_CONTACT_NAME), "uri": uri})
         if len(out) >= MAX_CONTACTS:
@@ -2210,18 +2248,35 @@ def cmd_contacts(args) -> int:
     uri = sip_address(args.uri or "")
     if not uri:
         die("contacts needs a sip: address, e.g. sip:1001@pbx.example.com")
-    kept = [c for c in contacts if c["uri"] != uri]
-    if args.action == "add":
-        name = contact_name_field(args.name or "")
-        if not name:
-            die("contacts add needs --name")
-        if len(kept) >= MAX_CONTACTS:
+    name = contact_name_field(args.name or "") if args.action == "add" else ""
+    if args.action == "add" and not name:
+        die("contacts add needs --name")
+    # Edit lines, never re-serialise the file: it is baresip's own, and
+    # carries things this command does not model -- comments, tel: entries,
+    # presence and, above all, `;access=block`, which is how baresip refuses
+    # a caller. Only the line for this address changes; its parameters stay.
+    text = read_exact(CONTACTS, fd, MAX_FILE) or ""
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    out, found = [], False
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or sip_address(stripped) != uri:
+            out.append(line)
+            continue
+        found = True
+        if args.action == "add":
+            tail = stripped.split(">", 1)[1] if ">" in stripped else ""
+            out.append(contact_line({"name": name, "uri": uri}) + tail)
+    if args.action == "add" and not found:
+        if len(contacts) >= MAX_CONTACTS:
             die(f"at most {MAX_CONTACTS} contacts")
-        kept.append({"name": name, "uri": uri})
-    elif len(kept) == len(contacts):
+        out.append(contact_line({"name": name, "uri": uri}))
+    if args.action == "remove" and not found:
         die(f"no contact for {uri}")
-    write_private(CONTACTS, "".join(contact_line(c) + "\n" for c in kept), fd)
-    print(json.dumps(kept, separators=(",", ":")))
+    write_private(CONTACTS, "".join(line + "\n" for line in out), fd)
+    print(json.dumps(read_contacts(fd), separators=(",", ":")))
     return 0
 
 
@@ -2576,6 +2631,21 @@ def cmd_account(args) -> int:
     if not password and current:
         password = account_field("password", params.get("auth_pass", ""))
     transport = args.transport or (account_transport() if current else "udp")
+    # Fields this command does not manage -- mediaenc, medianat, stunserver,
+    # sipnat, a custom audio_codecs, ... -- are carried through verbatim, so
+    # saving the form never quietly drops, say, mandatory SRTP. They come
+    # from the file as whole `key=value` segments, which the line was split
+    # on `;` to get, so they cannot contain one; a CR would end the line.
+    managed = {"auth_user", "auth_pass", "transport", "outbound", "answermode", "regint"}
+    extras = []
+    if current:
+        for field in current.get("raw", []):
+            key = field.partition("=")[0].strip()
+            if key in managed or "\r" in field or "\n" in field:
+                continue
+            if len(field) > MAX_ACCOUNT_FIELD * 2:
+                die(f"the stored account's {key!r} field is too long to carry over")
+            extras.append(field)
     regint = args.regint
     if regint is None:
         kept = params.get("regint", "")
@@ -2593,7 +2663,9 @@ def cmd_account(args) -> int:
     if outbound:
         entry += f';outbound="{outbound}"'
     entry += f";answermode=manual;regint={regint}"
-    entry += ";audio_codecs=opus/48000/2,PCMU/8000/1,PCMA/8000/1"
+    if not any(f.partition("=")[0].strip() == "audio_codecs" for f in extras):
+        entry += ";audio_codecs=opus/48000/2,PCMU/8000/1,PCMA/8000/1"
+    entry += "".join(";" + f for f in extras)
 
     # Accounts first: ensure_config() derives sip_transports from it, so
     # generating the config before the write would bake in the old transport.

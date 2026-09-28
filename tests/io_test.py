@@ -458,9 +458,24 @@ check("an address of record with no user part is refused",
       r.returncode != 0 and b"sip:user@host" in r.stderr)
 check("...and the stored account is untouched", stored_account()["uri"] == "sip:1001@pbx.example.com")
 
+parsed_line = mod.parse_account_line('"Bob" <sip:b@x>;auth_user=b;outbound="sip:p"')
 check("parse_account_line reads a display name, URI and fields",
-      mod.parse_account_line('"Bob" <sip:b@x>;auth_user=b;outbound="sip:p"')
-      == {"display": "Bob", "uri": "sip:b@x", "params": {"auth_user": "b", "outbound": "sip:p"}})
+      (parsed_line["display"], parsed_line["uri"], parsed_line["params"])
+      == ("Bob", "sip:b@x", {"auth_user": "b", "outbound": "sip:p"}))
+
+# --merge must keep what it does not manage, exactly.
+with open(path("merge/accounts"), "w") as fh:
+    fh.write('<sip:1001@pbx.example.com>;auth_user=u;auth_pass=pw ;transport=tls;'
+             'mediaenc=srtp-mand;stunserver="stun:stun.example.com";audio_codecs=opus/48000/2;regint=300\n')
+r = sip("account", "set", "--merge", "--display-name", "X", stdin=b"")
+kept = stored_account()
+check("--merge carries an unmanaged field through (mandatory SRTP stays mandatory)",
+      r.returncode == 0 and kept["params"].get("mediaenc") == "srtp-mand")
+check("...quoted ones too", 'stunserver="stun:stun.example.com"' in open(path("merge/accounts")).read())
+check("...keeps a custom codec list instead of the default",
+      kept["params"].get("audio_codecs") == "opus/48000/2"
+      and open(path("merge/accounts")).read().count("audio_codecs") == 1)
+check("...and keeps a password exactly, trailing space and all", kept["params"].get("auth_pass") == "pw ")
 check("parse_account_line caps the fields it keeps",
       len(mod.parse_account_line("<sip:a@b>" + ";k%d=v" * 100 % tuple(range(100)))["params"]) == 32)
 check("parse_account_line clips an oversized value",
