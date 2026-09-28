@@ -47,8 +47,8 @@ t("classify ignores another client's refusal",
 
 t("accountUri full", M.accountUri("sip:1001@pbx.example.com", "1001"), "sip:1001@pbx.example.com");
 t("accountUri adds scheme", M.accountUri("1001@pbx", ""), "sip:1001@pbx");
-t("accountUri bare host borrows the auth user", M.accountUri("pbx.example.com", "3077"), "sip:3077@pbx.example.com");
-t("accountUri sip:host borrows the auth user", M.accountUri("sip:pbx.example.com", "3077"), "sip:3077@pbx.example.com");
+t("accountUri bare host borrows the auth user", M.accountUri("pbx.example.com", "1001"), "sip:1001@pbx.example.com");
+t("accountUri sip:host borrows the auth user", M.accountUri("sip:pbx.example.com", "1001"), "sip:1001@pbx.example.com");
 t("accountUri bare host with no auth user is left for the CLI to refuse", M.accountUri("pbx", ""), "sip:pbx");
 t("accountUri empty", M.accountUri("  ", "x"), "");
 t("peerLabel params", M.peerLabel("sip:bob@192.168.22.10:5080;transport=udp"), "bob@192.168.22.10:5080");
@@ -70,9 +70,9 @@ t("callcount 0", M.parseCallCount("\n(no active calls)\n"), 0);
 
 // listcalls renders one call_debug block per call, headed by that call's state.
 const RINGING = [
-  "", "User-Agent: 3077@pbx", "--- Active calls (1) ---",
+  "", "User-Agent: 1001@pbx", "--- Active calls (1) ---",
   "  ===== Call debug (INCOMING) =====",
-  " local_uri: 3077 <sip:3077@pbx>",
+  " local_uri: 1001 <sip:1001@pbx>",
   ' peer_uri:  "Bob" <sip:27126578500@197.234.132.106>',
   " af=AF_INET id=bfe5ab9c6e3ed168",
   " direction: Incoming", "",
