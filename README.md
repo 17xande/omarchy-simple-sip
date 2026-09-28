@@ -1,34 +1,81 @@
 # Simple SIP
 
-A minimal SIP softphone for the Omarchy bar. One account, one call at a time:
-register, dial out, answer what comes in. [baresip](https://github.com/baresip/baresip)
-does all the SIP, RTP and audio work.
+A SIP softphone that lives in the [Omarchy](https://omarchy.org) bar. Register one
+account, call out, answer what comes in, and never leave the keyboard.
+[baresip](https://github.com/baresip/baresip) does the SIP, RTP and audio; a small,
+heavily fenced helper drives it; the panel follows your theme.
 
-![Simple SIP panel](preview.png)
+![plugin id](https://img.shields.io/badge/plugin-io.github.17xande.simple--sip-informational)
+![license](https://img.shields.io/badge/license-MIT-green)
+![baresip](https://img.shields.io/badge/engine-baresip%204.x-blue)
 
-```
-  registered, idle            ringing (blinking, urgent colour)
-  in a call                   dimmed: no account / daemon stopped
-```
+<p align="center">
+  <img src="preview.png" width="342" alt="The Simple SIP panel under the bar: the account and two new voicemails in the header, a dial field, Voicemail, Do not disturb and Account settings rows, then Recent calls — a missed call from a saved contact, an outgoing call, an answered one from an extension and an unanswered number.">
+</p>
+
+| A call coming in | In a call |
+|---|---|
+| <img src="docs/screenshots/incoming.png" width="342" alt="An incoming call from the saved contact Sam Rivera, with Answer and Reject rows."> | <img src="docs/screenshots/active.png" width="342" alt="A call in progress with Front desk: muted, 00:05 on the timer, keypad tones sent, and rows for Unmute, Hold, Keypad, Transfer and Hang up."> |
+| **Do not disturb** | **Setting up an account** |
+| <img src="docs/screenshots/dnd.png" width="342" alt="Do not disturb switched on: a crossed-out bell in the bar and the header, and the row reading On — calls go to voicemail."> | <img src="docs/screenshots/setup.png" width="342" alt="The account form: address, auth username, display name, password and transport."> |
+
+<p align="center">
+  <img src="docs/screenshots/bar-states.png" width="620" alt="The bar icon in four states: a phone with a red dot for a missed call, a red phone while ringing, a filled square phone during a call, and a crossed-out bell for Do not disturb.">
+</p>
+
+<sub>Every name and number in these screenshots is dummy `example.com` data.</sub>
+
+## Why
+
+A desk phone or a softphone window is one more thing to keep open, and neither
+knows about your desktop. This puts the phone where the rest of Omarchy lives: a
+glance at the bar says whether you are registered, whether you missed a call and
+whether there is voicemail; a call opens the panel with Answer under your hand, and
+the whole thing works from the keyboard.
+
+## Features
+
+- **Call, answer, reject** — type an extension, a number or a `sip:` address, or
+  pick a contact as you type. Incoming calls open the panel and ring with a real
+  double-ring, not baresip's recorded voice.
+- **In-call controls** — mute, hold and resume, a keypad for voicemail PINs and
+  phone trees, and blind transfer.
+- **Recent calls** — made, received and missed, kept by the daemon so nothing is
+  lost across shell restarts; select a row to call back.
+- **Missed-call dot** on the bar icon until you look, and a **notification** that
+  turns into "Missed call" — or disappears when you answer.
+- **Voicemail** — a count of new messages and a row that calls it.
+- **Contacts** — names instead of numbers everywhere, including notifications, and
+  suggestions in the dial field.
+- **Do not disturb** — calls go straight to voicemail and are still logged.
+- **`sip:` and `tel:` links** open the panel with the number filled in — never
+  dialled for you.
+- **Registration watch** — a notification when the account stops registering, so
+  silence never means "the phone was broken".
+- **Keyboard first** — every action has a key, and everything has an IPC call for
+  your own keybindings.
+- **Echo cancellation** for laptop speakers, **media paused** during calls, an
+  optional **call timer on the bar**.
+- **One account, one call at a time**, deliberately — see
+  [Not in this version](#not-in-this-version).
 
 ## Requirements
 
-Two packages, both in the official Arch repos:
+- Omarchy 4.x (the Quickshell shell).
+- Two packages from the official Arch repos:
 
-```bash
-omarchy pkg add baresip python-jeepney
-```
+  ```bash
+  omarchy pkg add baresip python-jeepney
+  ```
 
-- **`baresip`** — does all the SIP, RTP and audio work.
-- **`python-jeepney`** — 450 KiB, pure Python, and its only dependency is `python`
-  itself. The control helper drives baresip over D-Bus; jeepney is the client
-  library. Install it from the repos, not `pip install --user`: the helper runs
-  as `#!/usr/bin/python3 -I`, and isolated mode deliberately ignores the user
-  site directory, so a `--user` install would not be importable.
+  - **`baresip`** does all the SIP, RTP and audio work.
+  - **`python-jeepney`** (450 KiB, pure Python) is the D-Bus client the helper uses to
+    drive baresip. Install it from the repos, not `pip install --user`: the helper runs
+    as `#!/usr/bin/python3 -I`, and isolated mode deliberately ignores the user site
+    directory.
 
-Already present on any Omarchy install, listed for completeness: PipeWire's
-PulseAudio interface (`pipewire-pulse`) and `python3`. The control helper is
-stdlib plus jeepney — no pip packages, no build step, no compiled binary.
+PipeWire's PulseAudio interface and `python3` are already present on any Omarchy
+install. There is no build step, no pip package and no compiled binary.
 
 ## Install
 
@@ -36,27 +83,27 @@ stdlib plus jeepney — no pip packages, no build step, no compiled binary.
 omarchy plugin add https://github.com/17xande/omarchy-simple-sip --enable
 ```
 
-Then click **Start SIP daemon** in the panel, or run the same step from a terminal:
+Open the panel from the phone icon and click **Start SIP daemon**. That generates the
+baresip config, writes a `systemd --user` unit and starts it; the daemon holds the
+registration from then on, so calls arrive with the panel closed and across shell
+restarts. From a terminal, the same step is:
 
 ```bash
 ~/.config/omarchy/plugins/io.github.17xande.simple-sip/bin/omarchy-sip install
 ```
 
-Either way this generates the baresip config, writes a `systemd --user` unit and
-starts it. The daemon holds the SIP registration continuously, so calls arrive even
-when the panel is closed and across shell restarts.
-
-The examples below call the CLI as `omarchy-sip`. It is not put on your `PATH`;
-either use the full path above or add an alias:
+The CLI is not put on your `PATH`; the examples below call it `omarchy-sip`, so
+either use the full path or add an alias:
 
 ```bash
 alias omarchy-sip=~/.config/omarchy/plugins/io.github.17xande.simple-sip/bin/omarchy-sip
 ```
 
-Then set your account — either in the panel (the setup form appears until an account
-exists) or from a terminal, which keeps the password out of your shell history:
+### Set up your account
 
-![Account setup](docs/account-setup.png)
+The setup form appears in the panel until an account exists; afterwards it is
+**Account settings** (`s`). Or from a terminal, which keeps the password out of your
+shell history:
 
 ```bash
 read -rs PASSWORD
@@ -65,11 +112,12 @@ printf '%s' "$PASSWORD" | omarchy-sip account set sip:1001@pbx.example.com \
 unset PASSWORD
 ```
 
-The address must include the user part — `sip:1001@pbx.example.com`, not
+The address needs its user part — `sip:1001@pbx.example.com`, not
 `sip:pbx.example.com`; baresip refuses an account without one and registers
-nothing. The panel's form fills it in from the auth username if you type only the
-server. Saving the form keeps anything you leave blank, including the password;
-from a terminal, `account set --merge` does the same.
+nothing. Type only the server in the form and it is completed from the auth
+username. Saving the form keeps whatever you leave blank, the password included, and
+every account option this plugin does not manage; from a terminal,
+`account set --merge` does the same.
 
 ## Remove
 
@@ -78,9 +126,10 @@ from a terminal, `account set --merge` does the same.
 omarchy plugin remove io.github.17xande.simple-sip
 ```
 
-`uninstall` stops the daemon and removes the `systemd --user` unit. Your account,
-call history and generated config stay in `~/.config/omarchy-sip`; delete that
-directory too to remove every trace, including the stored SIP password.
+`uninstall` stops the daemon, removes the `systemd --user` unit and the link handler
+if you installed it. Your account, call history, contacts and generated config stay
+in `~/.config/omarchy-sip`; delete that directory too to remove every trace,
+including the stored SIP password.
 
 ## Using it
 
@@ -293,6 +342,23 @@ Environment overrides:
 Set them in the unit with `systemctl --user edit omarchy-sip`.
 
 ## Security notes
+
+Like every Omarchy plugin, this runs unsandboxed with your permissions. What it
+does about that, in short:
+
+- **No network control port.** baresip is driven over the session D-Bus, never
+  `ctrl_tcp`; the plugin's own socket is 0600 and checks the peer's uid.
+- **Nothing trusted by name.** Directories are pinned by descriptor, files checked on
+  the descriptor actually used, and writes replace rather than truncate.
+- **Everything bounded** — every file, record, field, process and log.
+- **Nothing forwarded blind.** Every command sent to baresip is allowlisted with its
+  own grammar; caller-supplied text never reaches a command line or a markup renderer
+  unchecked.
+- **A caller cannot steer the phone** — no second call, no dialling on their behalf, no
+  borrowed contact names, no voicemail number of their choosing.
+- **Tested.** Each of these has a regression test under `tests/`.
+
+The details follow.
 
 - Credentials live in `~/.config/omarchy-sip/accounts`, mode `0600`. baresip's
   accounts format is `;`-delimited, so a password containing `;` is rejected rather
@@ -524,7 +590,10 @@ ever called as `systemctl --user` and only ever names this plugin's own unit,
 
 ## Not in this version
 
-- No multiple accounts, and transfer is blind only (no attended transfer).
+- No multiple accounts, and one call at a time: a second call while one is up is
+  refused (busy), not offered as call waiting.
+- Transfer is blind only (no attended transfer); the far end cannot transfer *you*.
+- No video, conferencing or recording.
 - Direct IP-to-IP calls need a reachable interface; baresip refuses loopback
   destinations with `no laddr for 127.0.0.1`.
 
@@ -570,13 +639,16 @@ console.log(M.normalizeTarget("1001","sip:you@pbx.example.com"));'
 ./tests/run
 ```
 
-Four dependency-free suites: `tests/model_test.js` covers every pure function in
+Four suites, run with `node` and the system `/usr/bin/python3` (the interpreter the
+plugin itself uses, with `python-jeepney`): `tests/model_test.js` covers every pure function in
 `Model.js` (event mapping, URI completion, the registration-status scraping, contact
 matching, voicemail parsing, relative times), `tests/tracker_test.py` covers the call
 log's made / received / missed classification, interleaved calls, the size cap, file
 permissions and the unseen-missed count, `tests/daemon_test.py` covers what the
 daemon decides by itself — notifications, Do Not Disturb, contacts, links, echo
-cancellation — with fakes for the bus and the notifier, and `tests/io_test.py` covers the file/descriptor discipline described under
+cancellation, link handling, D-Bus sender checks against forged messages — with
+fakes for the bus and the notifier, and `tests/io_test.py` covers the
+file/descriptor discipline described under
 [Security notes](#directories-and-descriptors) — each case swaps a symlink, a FIFO,
 an intermediate directory or a hard link in for something the plugin expects to own,
 and asserts it fails, clips, or lands on the pinned object rather than following,
@@ -585,6 +657,12 @@ blocking, or buffering without limit.
 `/usr/lib/qt6/bin/qmllint` is a syntax check only: it cannot import `qs.Ui` or
 `qs.Commons`, so it prints warnings about every shell type and still exits 0. Exit
 255 means a parse error; a clean exit proves nothing else.
+
+### Screenshots
+
+The screenshots are taken with a separate tool that stands in for the daemon and
+replays scripted scenes of `example.com` dummy data, so no real account, number or
+call history ever appears in them.
 
 ## License
 
