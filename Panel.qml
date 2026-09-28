@@ -43,6 +43,8 @@ Panel {
   // End of the quiet window after an auto-open; see Model.typingGuard.
   property double typingGuardUntil: 0
   readonly property int typingQuietMs: 1500
+  property double lastPrefillAt: 0
+  readonly property int prefillIntervalMs: 3000
 
   // True when this key must be swallowed because the panel opened by itself
   // under someone's typing; also extends the window.
@@ -135,8 +137,10 @@ Panel {
                   contactUri: suggestions[k].uri, section: "suggest" })
     }
     if (sip.voicemailTarget !== "") {
+      // The meta names where it dials, so the number is never a surprise.
       rows.push({ id: "voicemail", label: "Voicemail", glyph: "\uf0e0", hint: "v",
-                  meta: sip.mwi.newCount > 0 ? sip.mwi.newCount + " new" : "",
+                  meta: (sip.mwi.newCount > 0 ? sip.mwi.newCount + " new · " : "")
+                        + Model.peerShort(Model.normalizeTarget(sip.voicemailTarget, sip.aor)),
                   urgent: sip.mwi.newCount > 0, section: "primary" })
     }
     rows.push({ id: "dnd", label: "Do not disturb", glyph: "\uf1f6", hint: "q",
@@ -148,7 +152,7 @@ Panel {
       var entry = sip.history[i]
       rows.push({
         id: "redial:" + Model.redialTarget(entry),
-        label: Model.historyLabel(entry, sip.contacts),
+        label: Model.historyLabel(entry, sip.contacts, sip.aor),
         contactUri: Model.redialTarget(entry),
         glyph: Model.historyGlyph(entry),
         meta: Model.historyMeta(entry, clock.now),
@@ -183,7 +187,7 @@ Panel {
   function openContact(uri) {
     if (!uri) return
     contactUri = uri
-    contactField.text = Model.contactName(uri, sip.contacts)
+    contactField.text = sip.nameFor(uri)
     Qt.callLater(function() { contactField.forceActiveFocus(); contactField.selectAll() })
   }
 
@@ -242,10 +246,14 @@ Panel {
     passwordField.text = ""
   }
 
-  onSetupOpenChanged: if (setupOpen) {
-    setupTouched = false
-    fillSetupForm()
-    sip.loadAccount()
+  onSetupOpenChanged: {
+    if (setupOpen) {
+      setupTouched = false
+      fillSetupForm()
+      sip.loadAccount()
+    } else {
+      passwordField.text = ""   // a cancelled form keeps no password around
+    }
   }
 
   Connections {
@@ -305,20 +313,33 @@ Panel {
     // Ringing is the one thing worth interrupting for: surface the panel so
     // Answer is one click away rather than buried behind the bar icon.
     onIncomingCall: function(peerUri) {
-      if (!sip.boolSetting("autoOpenOnIncoming", true)) return
-      // Every copy arms it: the one that opens is the focused monitor's.
+      // Armed on every ring, auto-open or not: a panel already open while
+      // someone types into its dial or contact field hands the keyboard to
+      // Answer/Reject the moment the field disappears. Every copy arms it;
+      // the one that opens is the focused monitor's.
       root.typingGuardUntil = Date.now() + root.typingQuietMs
-      if (root.isLeader) root.summonHere()
+      if (root.isLeader && sip.boolSetting("autoOpenOnIncoming", true)) root.summonHere()
     }
     onShowRequested: if (root.isLeader) root.summonHere()
     // A clicked link fills the dial field and opens the panel; the person
     // presses Enter. It never dials by itself -- a web page must not be able
     // to place a call. Every copy fills its own field, since the copy that
     // opens is the one on the focused monitor, not necessarily this one.
+    //
+    // The link picks the moment, so: at most one every few seconds, never
+    // over something the person is typing, and the same quiet-keyboard guard
+    // as an auto-open -- the panel takes the keyboard, and whatever they were
+    // typing elsewhere, Enter included, must not land in a field holding
+    // someone else's number.
     onPrefillRequested: function(target) {
       if (sip.callState !== "idle") return
+      var now = Date.now()
+      if (now - root.lastPrefillAt < root.prefillIntervalMs) return
+      if (dialField.activeFocus && root.dialText.trim() !== "") return
+      root.lastPrefillAt = now
       root.dialText = target
       root.cursorActive = false
+      root.typingGuardUntil = now + root.typingQuietMs
       if (root.isLeader) root.summonHere()
     }
   }
@@ -374,7 +395,7 @@ Panel {
     tooltipText: Model.barTooltip({
       daemonUp: sip.daemonUp, configured: sip.configured, registration: sip.registration,
       aor: sip.aor, lastError: sip.lastError, callState: sip.callState,
-      peerName: Model.contactName(sip.peer, sip.contacts) || Model.peerShort(sip.peer),
+      peerName: sip.nameFor(sip.peer) || Model.peerShort(sip.peer),
       duration: root.callDuration, muted: sip.muted, onHold: sip.onHold, dnd: sip.dnd,
       unseenMissed: sip.unseenMissed, newVoicemail: sip.mwi.newCount
     })
@@ -575,7 +596,7 @@ Panel {
             Text {
               textFormat: Text.PlainText
               width: parent.width
-              text: Model.contactName(sip.peer, sip.contacts) || Model.peerShort(sip.peer) || "unknown"
+              text: sip.nameFor(sip.peer) || Model.peerShort(sip.peer) || "unknown"
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.heading
@@ -588,7 +609,7 @@ Panel {
               visible: text !== ""
               text: {
                 var full = Model.peerLabel(sip.peer)
-                var big = Model.contactName(sip.peer, sip.contacts) || Model.peerShort(sip.peer)
+                var big = sip.nameFor(sip.peer) || Model.peerShort(sip.peer)
                 return full !== big ? full : ""
               }
               color: root.dim
@@ -671,7 +692,13 @@ Panel {
               enabled: !sip.busy
 
               onTextChanged: if (text !== root.dialText) root.dialText = text
-              onAccepted: root.placeCall()
+              // The key catcher stands aside while a field has focus, so the
+              // guard is applied here too: no typing, and above all no Enter,
+              // until the keyboard has been quiet.
+              onAccepted: if (!root.guardKey()) root.placeCall()
+              Keys.onPressed: function(event) {
+                if (Date.now() < root.typingGuardUntil) { root.guardKey(); event.accepted = true }
+              }
               Keys.onDownPressed: {
                 if (root.actions.length === 0) return
                 root.cursorIndex = 0
@@ -788,7 +815,7 @@ Panel {
               textFormat: Text.PlainText
               width: parent.width
               text: "Save " + Model.peerLabel(root.contactUri) + " as"
-                    + (Model.contactName(root.contactUri, sip.contacts) !== "" ? " (empty removes it)" : "")
+                    + (sip.nameFor(root.contactUri) !== "" ? " (empty removes it)" : "")
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -889,6 +916,7 @@ Panel {
               placeholderText: sip.accountDetails && sip.accountDetails.hasPassword
                                ? "Password (blank keeps the current one)" : "Password"
               password: true
+              onTextEdited: root.setupTouched = true
               foreground: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.body
@@ -981,6 +1009,9 @@ Panel {
       }
       // Right-click on a call or contact row saves (or renames) the contact.
       onClicked: function(mouse) {
+        // A row under a resting pointer becomes Answer or Reject when a call
+        // arrives; a click meant for the old row must not answer it.
+        if (root.guardKey()) return
         if (mouse.button === Qt.RightButton) {
           if (actionRow.action.contactUri) root.openContact(actionRow.action.contactUri)
           return

@@ -25,6 +25,10 @@ Item {
   readonly property int maxJsonChars: 262144   // a status/history document
   readonly property int maxErrorChars: 240     // what lastError can ever hold
 
+  // This instance's reply token, so the daemon's refusal of somebody else's
+  // command (another panel copy, a script) is never taken for this one's.
+  readonly property string panelToken: "panel-" + Math.random().toString(36).substring(2, 12)
+
   // Qt.resolvedUrl(".") may or may not carry a trailing slash depending on the
   // loader, so normalise before appending.
   readonly property string pluginDir: Qt.resolvedUrl(".").toString().replace("file://", "").replace(/\/+$/, "")
@@ -35,10 +39,11 @@ Item {
   // the interpreter is absolute and isolated already, but the loader still
   // reads LD_PRELOAD/LD_LIBRARY_PATH from whatever omarchy-shell happens to
   // have inherited, and a writable PATH entry would decide which `systemctl`
-  // the CLI finds. `clearEnvironment: true` plus these four keys is the whole
+  // the CLI finds. `clearEnvironment: true` plus these keys is the whole
   // surface: HOME and XDG_RUNTIME_DIR locate the config and runtime
   // directories, DBUS_SESSION_BUS_ADDRESS lets `systemctl --user` reach the
-  // user manager, and PATH is fixed rather than inherited.
+  // user manager, LANG, the plugin's own OMARCHY_SIP_* overrides below, and a
+  // PATH that is fixed rather than inherited.
   readonly property string cleanPath: "/usr/local/bin:/usr/bin:/bin"
 
   // The OMARCHY_SIP_* keys are this plugin's own documented overrides and have
@@ -183,10 +188,11 @@ Item {
 
   // Where "Call voicemail" goes: the configured number, or the account the
   // voicemail server itself named. Empty when neither is known.
-  readonly property string voicemailTarget: {
-    var configured = stringSetting("voicemailNumber", "", 64)
-    return configured !== "" ? configured : String(mwi.account || "")
-  }
+  readonly property string voicemailTarget:
+    Model.voicemailTarget(stringSetting("voicemailNumber", "", 64), mwi.account, aor)
+
+  // A saved name for a peer, matched as Model.contactName allows.
+  function nameFor(uri) { return Model.contactName(uri, contacts, aor) }
 
   function boolSetting(name, fallback) {
     var value = setting(name, fallback)
@@ -271,7 +277,13 @@ Item {
     var pending = Object.assign({}, pendingOptions)
     pending[key] = value
     pendingOptions = pending
-    run(["option", "set", key, value ? "on" : "off"])
+    // Not queued means not happening: drop the pending value, or the panel
+    // would show (and act on) a setting the daemon never got.
+    if (!run(["option", "set", key, value ? "on" : "off"])) {
+      var undo = Object.assign({}, pendingOptions)
+      delete undo[key]
+      pendingOptions = undo
+    }
   }
 
   function toggleDnd() {
@@ -296,7 +308,8 @@ Item {
   // instead of a bare path string, and the existing action watchdog and
   // bounded error buffer come for free.
   function command(name, params) {
-    return run(params ? ["send", name, params] : ["send", name])
+    var args = ["send", "--token=" + panelToken, name]
+    return run(params ? args.concat([params]) : args)
   }
 
   // Keeps a bounded prefix of a process's diagnostic output. Called per line,
@@ -400,7 +413,7 @@ Item {
       var p = players[i]
       if (p && p.isPlaying && p.canPause) {
         p.pause()
-        if (paused.indexOf(p.dbusName) < 0) paused.push(p.dbusName)
+        paused.push(p.dbusName + "\n" + p.identity)
       }
     }
     pausedPlayers = paused
@@ -411,7 +424,9 @@ Item {
     var players = Mpris.players ? Mpris.players.values : []
     for (var i = 0; i < players.length; i++) {
       var p = players[i]
-      if (p && pausedPlayers.indexOf(p.dbusName) >= 0 && !p.isPlaying && p.canPlay) p.play()
+      // Same bus name *and* identity: a player that quit during the call and
+      // had its name taken by another is not the one that was paused.
+      if (p && pausedPlayers.indexOf(p.dbusName + "\n" + p.identity) >= 0 && !p.isPlaying && p.canPlay) p.play()
     }
     pausedPlayers = []
   }
@@ -444,9 +459,9 @@ Item {
     if (!Model.validDigits(d)) return "not keypad digits: " + d
     if (actionProcess.running) {
       if (commandQueue.length >= maxQueuedCommands) return "too many commands queued"
-      commandQueue = Model.queueDigits(commandQueue, d)
+      commandQueue = Model.queueDigits(commandQueue, d, panelToken)
     } else {
-      startAction(["send", "sndcode", d])
+      startAction(["send", "--token=" + panelToken, "sndcode", d])
     }
     sentDigits = (sentDigits + d).slice(-24)
     return ""
@@ -463,7 +478,7 @@ Item {
     if (target === "") return false
     var n = String(name || "").trim()
     return runContacts(n === "" ? [cli, "contacts", "remove", target]
-                                : [cli, "contacts", "add", target, "--name", n])
+                                : [cli, "contacts", "add", target, "--name=" + n])
   }
 
   function runContacts(args) {
@@ -494,10 +509,13 @@ Item {
   // does clear it.
   function setAccount(uri, authUser, displayName, transport, password) {
     if (accountProcess.running) return false
-    var args = [cli, "account", "set", uri, "--merge",
-                "--auth-user", String(authUser || ""),
-                "--display-name", String(displayName || "")]
-    if (transport) args = args.concat(["--transport", transport])
+    // `--opt=value` forms: a value that starts with "-" is then still a value,
+    // not an option argparse refuses (after the form has already closed).
+    var args = [cli, "account", "set", "--merge",
+                "--auth-user=" + String(authUser || ""),
+                "--display-name=" + String(displayName || "")]
+    if (transport) args.push("--transport=" + transport)
+    args.push("--", uri)
     lastError = ""
     accountProcess.errText = ""
     accountProcess.command = args
@@ -524,7 +542,7 @@ Item {
       return   // not ours; the stream only ever carries JSON, so ignore quietly
     }
 
-    var update = Model.classifyEvent(event)
+    var update = Model.classifyEvent(event, panelToken)
     if (!update) return
 
     // `send` is fire-and-forget, so its process exits 0 whether or not the
@@ -557,7 +575,7 @@ Item {
         peer = ""
         callId = ""
         callStartedAt = 0
-        if (update.error) lastError = update.error
+        if (update.error) lastError = elide(update.error)
       } else {
         refresh()
       }
@@ -594,7 +612,7 @@ Item {
     if (update.kind === "registration") {
       registration = update.registration
       if (update.aor) aor = update.aor
-      lastError = update.registration === "failed" ? (update.error || "Registration failed") : ""
+      lastError = update.registration === "failed" ? elide(update.error || "Registration failed") : ""
       return
     }
 
@@ -811,6 +829,9 @@ Item {
     onExited: function(exitCode) {
       actionWatchdog.stop()
       if (exitCode !== 0) {
+        // Whatever was pending did not happen (an `option set`, say); the
+        // daemon's next OPTIONS record is the truth again.
+        root.pendingOptions = ({})
         root.lastError = elide(actionProcess.errText || "Command failed")
         // The optimistic dial never happened -- fall back to what is real.
         root.refresh()

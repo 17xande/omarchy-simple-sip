@@ -3,7 +3,7 @@
 const fs = require("fs");
 const src = fs.readFileSync(require("path").join(__dirname, "..", "Model.js"), "utf8");
 const M = {};
-new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,validCallId,typingGuard,isKeypadKey,parseMwi,validDigits,queueDigits,optionChanges,pickOptions,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,accountUri,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,barTooltip,lastOutbound,callTitle,domainOf,historyGlyph,parseHistory,contactName,matchContacts,redialTarget,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
+new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,validCallId,typingGuard,isKeypadKey,parseMwi,validDigits,queueDigits,optionChanges,pickOptions,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,accountUri,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,barTooltip,lastOutbound,callTitle,domainOf,historyGlyph,parseHistory,voicemailTarget,tipLine,contactName,matchContacts,redialTarget,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
 
 let fails = 0;
 const ESC = String.fromCharCode(27);
@@ -124,14 +124,15 @@ t("digits valid", M.validDigits("0123456789*#"), true);
 t("digits refuse a letter", M.validDigits("1e"), false);
 t("digits refuse a separator", M.validDigits("1;2"), false);
 t("digits refuse empty", M.validDigits(""), false);
-t("queueDigits starts a command", M.queueDigits([], "1"), [["send", "sndcode", "1"]]);
-t("queueDigits extends queued DTMF", M.queueDigits([["send", "sndcode", "12"]], "3"), [["send", "sndcode", "123"]]);
+const TK = "--token=panel-x";
+t("queueDigits starts a command", M.queueDigits([], "1", "panel-x"), [["send", TK, "sndcode", "1"]]);
+t("queueDigits extends queued DTMF", M.queueDigits([["send", TK, "sndcode", "12"]], "3", "panel-x"), [["send", TK, "sndcode", "123"]]);
 t("queueDigits does not extend another command",
-  M.queueDigits([["send", "hangup"]], "1"), [["send", "hangup"], ["send", "sndcode", "1"]]);
+  M.queueDigits([["send", TK, "hangup"]], "1", "panel-x"), [["send", TK, "hangup"], ["send", TK, "sndcode", "1"]]);
 t("queueDigits stops at the grammar's limit",
-  M.queueDigits([["send", "sndcode", "1".repeat(32)]], "2").length, 2);
-const q0 = [["send", "sndcode", "1"]]; M.queueDigits(q0, "2");
-t("queueDigits leaves its input alone", q0, [["send", "sndcode", "1"]]);
+  M.queueDigits([["send", TK, "sndcode", "1".repeat(32)]], "2", "panel-x").length, 2);
+const q0 = [["send", TK, "sndcode", "1"]]; M.queueDigits(q0, "2", "panel-x");
+t("queueDigits leaves its input alone", q0, [["send", TK, "sndcode", "1"]]);
 t("classify transfer failure", M.classifyEvent({ type: "TRANSFER_FAILED", param: "603 Decline" }),
   { kind: "transferFailed", error: "603 Decline" });
 t("mwi waiting", M.parseMwi("Messages-Waiting: yes\r\nMessage-Account: sip:*97@pbx.example.com\r\nVoice-Message: 2/8 (0/2)\r\n"),
@@ -155,9 +156,13 @@ const BOOK = [
 ];
 t("contactName by address", M.contactName("sip:1001@pbx.example.com;user=phone", BOOK), "Front desk");
 t("contactName display-name form", M.contactName('"x" <sip:+15550100@gw.example.com>', BOOK), "Mum");
-t("contactName by unique user part", M.contactName("sip:1001@10.0.0.5", BOOK), "Front desk");
+t("contactName by unique user part from an IP", M.contactName("sip:1001@10.0.0.5", BOOK), "Front desk");
+t("contactName by unique user part from the account's domain",
+  M.contactName("sip:1001@pbx.example.com:5060", [{ name: "N", uri: "sip:1001@pbxname" }], "sip:me@pbx.example.com"), "N");
+t("contactName never lends a name to another domain's caller",
+  M.contactName("sip:1001@attacker.example", BOOK, "sip:me@pbx.example.com"), "");
 t("contactName not for a short user part", M.contactName("sip:10@x", [{ name: "N", uri: "sip:10@y" }]), "");
-t("contactName not when ambiguous", M.contactName("sip:1001@z", BOOK.concat([{ name: "O", uri: "sip:1001@q" }])), "");
+t("contactName not when ambiguous", M.contactName("sip:1001@10.0.0.9", BOOK.concat([{ name: "O", uri: "sip:1001@q" }])), "");
 t("contactName unknown", M.contactName("sip:9@x", BOOK), "");
 t("contactName no book", M.contactName("sip:1001@pbx.example.com", undefined), "");
 t("hist label uses contact", M.historyLabel({ peer: "sip:1001@pbx.example.com" }, BOOK), "Front desk");
@@ -198,6 +203,16 @@ t("call id refuses quote", M.validCallId('a"b'), false);
 t("call id refuses backslash", M.validCallId("a\\b"), false);
 t("call id refuses newline", M.validCallId("ab\n"), false);
 t("call id refuses empty", M.validCallId(""), false);
+t("voicemail configured wins", M.voicemailTarget("*97", "sip:+1900@evil.example", "sip:me@pbx.example.com"), "*97");
+t("voicemail server account on our domain", M.voicemailTarget("", "sip:*97@pbx.example.com", "sip:me@pbx.example.com"), "sip:*97@pbx.example.com");
+t("voicemail server account elsewhere is refused", M.voicemailTarget("", "sip:+19005550100@evil.example", "sip:me@pbx.example.com"), "");
+t("voicemail undialable account is refused", M.voicemailTarget("", "sip:*97@pbx.example.com;x=1", "sip:me@pbx.example.com"), "");
+t("voicemail nothing", M.voicemailTarget("", "", "sip:me@pbx.example.com"), "");
+t("tooltip lines are clipped", M.tipLine("x".repeat(5000)).length, 120);
+t("classify refusal of another panel's command",
+  M.classifyEvent({ response: true, ok: false, data: "x", token: "panel-aaaa" }, "panel-bbbb"), null);
+t("classify refusal of this panel's command",
+  M.classifyEvent({ response: true, ok: false, data: "x", token: "panel-aaaa" }, "panel-aaaa"), { kind: "commandFailed", error: "x" });
 t("duration 95s", M.durationText(1000, 1000 + 95000), "01:35");
 t("duration hours", M.durationText(1, 1 + 3725000), "1:02:05");
 t("duration unset", M.durationText(0, 5000), "");

@@ -19,13 +19,13 @@ function stripAnsi(text) {
 // Map a baresip event object onto the panel's vocabulary. Returns null for
 // events the panel does not model (RTCP ticks, SDP exchanges, module noise),
 // which keeps the caller free of a long switch.
-function classifyEvent(ev) {
+function classifyEvent(ev, panelToken) {
   // A command response rather than an event. Only a refusal or failure of a
-  // command the panel sent (token "panel") matters here: a successful reply
+  // command this panel sent (its own token) matters here: a successful reply
   // carries nothing the events do not, and other tokens belong to other
   // clients' request/reply round trips, which every client sees broadcast.
   if (ev && ev.response === true) {
-    if (ev.ok === false && String(ev.token || "") === "panel")
+    if (ev.ok === false && String(ev.token || "") === String(panelToken || "panel"))
       return { kind: "commandFailed", error: String(ev.data || "") || "Command failed" }
     return null
   }
@@ -193,6 +193,21 @@ function parseMwi(body) {
   return out
 }
 
+// Where "Call voicemail" may go. The server's Message-Account is taken only
+// when it is on the account's own domain and dialable: the MWI body comes
+// from the network, and the row would otherwise dial whatever address it
+// names -- a premium-rate number, or an IVR posing as voicemail that asks
+// for the PIN. A configured number always wins.
+function voicemailTarget(configured, mwiAccount, aor) {
+  var c = String(configured || "").trim()
+  if (c !== "") return c
+  var account = String(mwiAccount || "").trim()
+  var target = normalizeTarget(account, aor)
+  if (target === "" || !validTarget(target)) return ""
+  var domain = domainOf(aor).toLowerCase()
+  return domain !== "" && domainOf(target).toLowerCase() === domain ? target : ""
+}
+
 // ------------------------------------------------------------------ dialling
 
 // Accept what a person would actually type. A bare extension or phone number
@@ -304,13 +319,15 @@ function validDigits(digits) {
 // DTMF and there is room, extend it rather than queue another process --
 // someone typing an account number at an IVR types faster than a CLI starts.
 // Returns the new queue; never mutates the one given.
-function queueDigits(queue, digits) {
+function queueDigits(queue, digits, token) {
   var q = (queue || []).slice()
+  var head = ["send", "--token=" + String(token || "panel"), "sndcode"]
   var last = q.length ? q[q.length - 1] : null
-  if (last && last[0] === "send" && last[1] === "sndcode" && (last[2] + digits).length <= 32) {
-    q[q.length - 1] = ["send", "sndcode", last[2] + digits]
+  if (last && last.length === 4 && last[0] === head[0] && last[1] === head[1] && last[2] === head[2]
+      && (last[3] + digits).length <= 32) {
+    q[q.length - 1] = head.concat([last[3] + digits])
   } else {
-    q.push(["send", "sndcode", digits])
+    q.push(head.concat([digits]))
   }
   return q
 }
@@ -390,24 +407,31 @@ function redialTarget(entry) {
   return (/^\s*(?:[^<]*<)?sips:/.test(peer) ? "sips:" : "sip:") + label
 }
 
-function historyLabel(entry, contacts) {
+function historyLabel(entry, contacts, aor) {
   var peer = (entry && entry.peer) || ""
-  return contactName(peer, contacts) || peerShort(peer) || "unknown"
+  return contactName(peer, contacts, aor) || peerShort(peer) || "unknown"
 }
 
 // ---------------------------------------------------------------- contacts
 
 // The saved name for a peer, matched on the bare address. Falls back to the
 // user part alone when exactly one contact has it (and it is not a two-digit
-// code), so an extension saved against the PBX's hostname still matches a
-// call that arrives from its IP. Mirrors contact_name_for() in the CLI.
-function contactName(uri, contacts) {
+// code) -- so an extension saved against the PBX's hostname still matches a
+// call that arrives from its IP -- but only when the call comes from the
+// account's own domain or an IP literal. Anyone can call from
+// sip:1001@their-own-host; that is not "Front desk". Mirrors
+// contact_name_for() in the CLI.
+function contactName(uri, contacts, aor) {
   var label = peerLabel(uri)
   var list = contacts || []
   if (label === "") return ""
   for (var i = 0; i < list.length; i++) {
     if (peerLabel(list[i].uri) === label) return String(list[i].name || "")
   }
+  var host = label.indexOf("@") > 0 ? label.substring(label.indexOf("@") + 1).split(":")[0].toLowerCase() : ""
+  var domain = domainOf(aor).split(":")[0].toLowerCase()
+  var isIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || /^\[[0-9a-f:.]+\]$/i.test(host)
+  if (!(host !== "" && (host === domain || isIp))) return ""
   var user = label.split("@")[0]
   if (user.length < 3) return ""
   var found = ""
@@ -481,6 +505,13 @@ function heroMeta(state) {
   return s.aor || "Starting…"
 }
 
+// One tooltip line, clipped: the bar sizes its tooltip window to the text,
+// unwrapped, and some of these come from the network.
+function tipLine(text) {
+  var t = String(text || "").replace(/\s+/g, " ")
+  return t.length > 120 ? t.substring(0, 119) + "…" : t
+}
+
 // The bar icon's tooltip: what the icon alone cannot say. First line is the
 // state that matters most right now; extras follow, one per line.
 function barTooltip(state) {
@@ -505,7 +536,7 @@ function barTooltip(state) {
   if (s.dnd) lines.push("Do not disturb")
   if (s.unseenMissed > 0) lines.push(s.unseenMissed + " missed call" + (s.unseenMissed === 1 ? "" : "s"))
   if (s.newVoicemail > 0) lines.push(s.newVoicemail + " new voicemail" + (s.newVoicemail === 1 ? "" : "s"))
-  return lines.join("\n")
+  return lines.map(tipLine).join("\n")
 }
 
 // The most recent call we placed, for "redial": [] -> "".
