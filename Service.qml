@@ -293,6 +293,9 @@ Item {
   }
 
   onSettingsChanged: syncOptions()
+  // The form fills from these; an account set or cleared elsewhere (the CLI,
+  // another panel copy) must not leave the old details on screen.
+  onConfiguredChanged: loadAccount()
   onOptionSyncChanged: syncOptions()
 
   function drainQueue() {
