@@ -1173,14 +1173,25 @@ def history_record(obj: dict) -> dict:
     history must not be able to hand the panel a megabyte-long "peer".
     """
     return {
-        "ts": float(obj.get("ts") or 0),
+        "ts": finite(obj.get("ts")),
         "direction": "in" if obj.get("direction") == "in" else "out",
         "peer": clip(obj.get("peer") or ""),
         "missed": obj.get("missed") is True,
         "duration": max(0, min(int(obj.get("duration") or 0), 7 * 86400)),
         "reason": clip(obj.get("reason") or ""),
-        "end": float(obj.get("end") or obj.get("ts") or 0),
+        "end": finite(obj.get("end") or obj.get("ts")),
     }
+
+
+def finite(value) -> float:
+    """A timestamp from a user-writable file: a finite, non-negative float.
+    NaN and Infinity parse as floats and print as bare words no JSON parser
+    accepts, which would break the panel's reading of the whole document."""
+    try:
+        number = float(value or 0)
+    except (TypeError, ValueError):
+        return 0.0
+    return number if math.isfinite(number) and number > 0 else 0.0
 
 
 def read_history(limit: int) -> list[dict]:
@@ -1777,6 +1788,9 @@ def cmd_daemon(_args) -> int:
         if name == "reload-options":
             options = read_options()
             hub.greet(json.dumps({"type": "OPTIONS", **options}, separators=(",", ":")))
+            if token:
+                hub.broadcast(json.dumps({"response": True, "ok": True, "data": "", "token": token},
+                                         separators=(",", ":")))
         elif name == "prefill":
             hub.broadcast(json.dumps({"type": "PREFILL", "target": params}, separators=(",", ":")))
             if token:
@@ -2209,8 +2223,12 @@ def cmd_option(args) -> int:
     changed = options[args.key] != value
     options[args.key] = value
     write_options(options)
+    applied = True
     if daemon_up():
-        send_command(command_json("reload-options", None, "cli"))
+        # A round trip, so "on" is not printed for a daemon that refused the
+        # reload (or is too old to know it).
+        reply = request("reload-options", timeout=3)
+        applied = bool(reply and reply.get("ok"))
     # Echo cancellation is a module in baresip's config, so it only takes
     # effect when baresip starts -- and restarting drops any call in progress.
     if args.key == "aec" and changed:
@@ -2219,15 +2237,16 @@ def cmd_option(args) -> int:
             print("omarchy-sip: echo cancellation takes effect after this call (restart the daemon then)")
         else:
             restart_if_live()
+    if not applied:
+        print(f"omarchy-sip: {args.key} saved as {'on' if value else 'off'}, but the daemon did not "
+              "confirm it -- restart it: omarchy-sip restart", file=sys.stderr)
+        return 1
     print(f"omarchy-sip: {args.key} {'on' if value else 'off'}")
     return 0
 
 
 def read_seen() -> float:
-    try:
-        return max(0.0, float(read_bounded(SEEN, conf_fd(), 64).strip() or 0))
-    except ValueError:
-        return 0.0
+    return finite(read_bounded(SEEN, conf_fd(), 64).strip())
 
 
 def unseen_missed(seen: float) -> int:
@@ -2311,9 +2330,16 @@ def link_target(url: str) -> str:
         return ""
     if scheme == "tel":
         number = re.sub(r"[\s().-]", "", rest.split(";", 1)[0])
-        return number if PREFILL_TARGET.match(number) else ""
-    uri = peer_uri(f"{scheme}:{rest.lstrip('/')}")
-    return uri if PREFILL_TARGET.match(uri) else ""
+        target = number
+    else:
+        target = peer_uri(f"{scheme}:{rest.lstrip('/')}")
+    # A PBX feature code (*72 forwarding, *67 caller-ID blocking, #...) is
+    # not something a web page gets to put in front of a person, even for
+    # them to confirm.
+    user = target.partition(":")[2] if ":" in target else target
+    if user.startswith(("*", "#")):
+        return ""
+    return target if PREFILL_TARGET.fullmatch(target) else ""
 
 
 def cmd_open(args) -> int:
@@ -2494,7 +2520,7 @@ def cmd_history(args) -> int:
         "calls": read_history(args.limit),
         "unseenMissed": unseen_missed(seen),
         "seenTs": seen,
-    }, separators=(",", ":")))
+    }, separators=(",", ":"), allow_nan=False))
     return 0
 
 

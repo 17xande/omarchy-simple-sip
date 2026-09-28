@@ -151,6 +151,11 @@ without ringing, notifying or opening the panel. The call is still logged, as
 "Missed · DND", and still marks the bar. The bar icon becomes a crossed-out bell.
 It is enforced by the daemon, so it holds while the shell is closed.
 
+The call is rejected by its own Call-ID. A caller whose Call-ID cannot be named on
+baresip's command line (see [What arrives from the network](#what-arrives-from-the-network))
+is not rejected; that call rings, and is notified and logged like any other, rather
+than being silently mislabelled.
+
 baresip has a `dnd` of its own, but it refuses the call before one exists, so
 nothing would be logged at all.
 
@@ -310,6 +315,14 @@ layer, and `dbus-daemon` authenticates every client with `SO_PEERCRED` (EXTERNAL
 auth) rather than trusting whoever connects. The daemon refuses to start if
 `com.github.Baresip` is already owned, rather than driving somebody else's baresip.
 
+Authenticated *connections* are not authenticated *signals*, though: any client on
+your session bus can emit one with baresip's interface and path. So the daemon
+resolves the unique bus name of the baresip it started and accepts events only from
+it, and takes notification clicks only from the notification server's current
+unique name — forgetting every notification id whenever that server changes (the
+Omarchy shell *is* the server, and a restarted shell reuses the same small ids for
+other apps' notifications).
+
 The plugin's own control socket is checked the same way: it is 0600 inside a 0700
 pinned directory, and `accept()` additionally reads `SO_PEERCRED` and refuses any
 client that is not this uid — asking the kernel who is on the other end rather than
@@ -329,6 +342,11 @@ directories (`/usr/local/bin`, `/usr/bin`, `/bin`) and never from `$PATH`. The
 helper's shebang is `#!/usr/bin/python3 -I` — absolute, so no version-manager shim
 or writable `PATH` entry picks the interpreter, and isolated, so `PYTHONPATH`,
 `PYTHONHOME` and the user site directory cannot inject code into it.
+
+The helper runs exactly two other programs: `systemctl --user` (for its own unit)
+and `baresip`. Nothing that writes files is delegated to a script — the link
+handler edits `mimeapps.list` itself rather than running `xdg-mime`, which rewrites
+it by pathname, following links and truncating in place.
 
 Every process the panel launches sets `clearEnvironment: true` and receives only
 `HOME`, `XDG_RUNTIME_DIR`, `DBUS_SESSION_BUS_ADDRESS`, `LANG`, a fixed `PATH`, and
@@ -391,10 +409,19 @@ and `O_NONBLOCK` is what stops a FIFO substituted for a regular file from parkin
 helper inside `open()`.
 
 `~/.config/systemd/user` gets the same treatment — the unit file is created and
-removed relative to a pinned descriptor, never by pathname. Its *mode*, though, is
-left exactly as found: that directory is systemd's, not this plugin's, and forcing a
-mode on it would silently widen a private one. Only the two directories the plugin
-owns have their mode enforced, and only downwards.
+removed relative to a pinned descriptor, never by pathname — and so do
+`~/.local/share/applications` (the link handler's desktop entry) and `~/.config`
+(its `mimeapps.list` defaults). Their *modes*, though, are left exactly as found:
+those directories are not this plugin's, and forcing a mode on one would silently
+widen a private one. Only the two directories the plugin owns have their mode
+enforced, and only downwards. A `mimeapps.list` that is a symlink is not followed or
+replaced; the handler prints the lines to add instead.
+
+Files the plugin rewrites but does not own the format of — baresip's `contacts` and
+`accounts` — are edited, not regenerated: only the line or fields being changed are
+touched, so `;access=block` (baresip's call blocking), comments, and account options
+this plugin does not model, such as `mediaenc`, survive. A file too large, or not
+UTF-8, is refused rather than rewritten lossily.
 
 ### Writes replace, they never truncate
 
@@ -413,7 +440,9 @@ Nothing is read without one: whole-file reads cap at 1 MiB, one event record or
 command line at 64 KiB, one history field at 512 bytes, 200 history records, and
 baresip's prose replies at 8 KiB before they are spliced into `omarchy-sip status`.
 An oversized record is dropped and the stream resynchronises at the next newline
-rather than buffering. A client that never sends a newline cannot grow the daemon's
+rather than buffering. Both D-Bus connections are bounded by the bus's own maximum
+message size, the same as any D-Bus client, and the notifier keeps at most 64 ids.
+A client that never sends a newline cannot grow the daemon's
 memory, and one that stops reading is disconnected rather than buffered forever.
 
 ### Processes
@@ -445,16 +474,36 @@ process where a raw socket would have needed none.
 
 ### What arrives from the network
 
-Caller IDs, contact names and voicemail summaries are chosen by whoever sends them.
-Every `Text` in the panel is `Text.PlainText`. The notification server renders
-markup, so the daemon escapes, flattens and clips everything it puts in a
-notification. A SIP Call-ID reaches baresip's command line only for Do Not Disturb's
-`hangup <id>`, and only when it matches a strict character class. Voicemail counts
-are clamped, and contacts, like every other file, are read through the pinned
-directory with a byte cap, an entry cap and clipped fields.
+Caller IDs, display names, Call-IDs and voicemail summaries are chosen by whoever
+sends them.
+
+- Every `Text` in the panel is `Text.PlainText`, and every tooltip line is clipped:
+  the bar sizes its tooltip window to unwrapped text.
+- The notification server renders markup, so the daemon escapes, flattens and clips
+  everything it puts in a notification.
+- **One call at a time** is enforced (`call_max_calls 1`): a second INVITE is refused
+  with 486 before a call exists. Otherwise it would become baresip's "current call",
+  and accept, mute, hold, tones and transfer — which act on the current call — would
+  act on the newcomer.
+- Accept, hang up, hold and resume name their call by its Call-ID, which reaches
+  baresip's command line only when it is printable ASCII without space, `=`, `;`,
+  quotes or backslash. A notification button for a call that cannot be named does
+  nothing.
+- A saved contact's name is lent to a caller matched only by extension when the call
+  comes from the account's own domain or an IP literal — never to
+  `sip:1001@somebody-elses-host`.
+- The **Voicemail** row dials the voicemail server's announced account only when it
+  is on the account's own domain, and shows where it dials; the MWI body is not
+  trusted to choose a number.
+- Voicemail counts are clamped, timestamps must be finite, and contacts, like every
+  other file, are read through the pinned directory with a byte cap, an entry cap
+  and clipped fields.
 
 A clicked `sip:`/`tel:` link is text from anywhere. It only ever fills the dial
-field, after passing the same grammar the daemon enforces, and never dials.
+field, after passing the same grammar the daemon enforces; never with a PBX feature
+code (`*72`, `#…`); at most once every three seconds; never over a number being
+typed; and behind the same quiet-keyboard guard as an incoming call, so keys and
+Enter typed elsewhere cannot land in it. It never dials.
 
 ### Privileges
 

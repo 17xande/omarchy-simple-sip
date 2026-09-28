@@ -234,6 +234,8 @@ for url, want in (
     ("sip://1001@pbx", "sip:1001@pbx"),
 ):
     check(f"link {url!r} fills {want!r}", mod.link_target(url) == want)
+for url in ("tel:*72%205551234", "tel:%2372", "sip:*72@pbx.example.com"):
+    check(f"a feature-code link {url!r} is refused", mod.link_target(url) == "")
 for url in ("http://evil", "tel:", "tel:12%0aquit", "sip:a@b%0ahangup", "tel:" + "1" * 40,
             "javascript:alert(1)", "sip:a b@c", "", "x" * 600):
     check(f"link {url[:30]!r} is refused", mod.link_target(url) == "")
@@ -521,6 +523,12 @@ r = handler("install")
 check("a symlinked mimeapps.list is not followed or replaced",
       r.returncode != 0 and os.path.islink(mimeapps) and open(secret).read() == "secret\n"
       and b"yourself" in r.stderr)
+
+check("a NaN or Infinity timestamp is not passed on",
+      mod.finite("nan") == 0.0 and mod.finite("inf") == 0.0 and mod.finite(float("inf")) == 0.0
+      and mod.finite("12.5") == 12.5 and mod.finite(None) == 0.0 and mod.finite("x") == 0.0)
+check("a history row with Infinity reads as finite",
+      mod.history_record({"ts": float("inf"), "end": float("nan")})["ts"] == 0.0)
 
 print("\nall passed" if not fails else f"\n{fails} FAILED")
 sys.exit(1 if fails else 0)
