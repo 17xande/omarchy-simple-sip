@@ -125,14 +125,15 @@ t("digits refuse a letter", M.validDigits("1e"), false);
 t("digits refuse a separator", M.validDigits("1;2"), false);
 t("digits refuse empty", M.validDigits(""), false);
 const TK = "--token=panel-x";
-t("queueDigits starts a command", M.queueDigits([], "1", "panel-x"), [["send", TK, "sndcode", "1"]]);
-t("queueDigits extends queued DTMF", M.queueDigits([["send", TK, "sndcode", "12"]], "3", "panel-x"), [["send", TK, "sndcode", "123"]]);
+const DD = "--";
+t("queueDigits starts a command", M.queueDigits([], "1", "panel-x"), [["send", TK, DD, "sndcode", "1"]]);
+t("queueDigits extends queued DTMF", M.queueDigits([["send", TK, DD, "sndcode", "12"]], "3", "panel-x"), [["send", TK, DD, "sndcode", "123"]]);
 t("queueDigits does not extend another command",
-  M.queueDigits([["send", TK, "hangup"]], "1", "panel-x"), [["send", TK, "hangup"], ["send", TK, "sndcode", "1"]]);
+  M.queueDigits([["send", TK, DD, "hangup"]], "1", "panel-x"), [["send", TK, DD, "hangup"], ["send", TK, DD, "sndcode", "1"]]);
 t("queueDigits stops at the grammar's limit",
-  M.queueDigits([["send", TK, "sndcode", "1".repeat(32)]], "2", "panel-x").length, 2);
-const q0 = [["send", TK, "sndcode", "1"]]; M.queueDigits(q0, "2", "panel-x");
-t("queueDigits leaves its input alone", q0, [["send", TK, "sndcode", "1"]]);
+  M.queueDigits([["send", TK, DD, "sndcode", "1".repeat(32)]], "2", "panel-x").length, 2);
+const q0 = [["send", TK, DD, "sndcode", "1"]]; M.queueDigits(q0, "2", "panel-x");
+t("queueDigits leaves its input alone", q0, [["send", TK, DD, "sndcode", "1"]]);
 t("classify transfer failure", M.classifyEvent({ type: "TRANSFER_FAILED", param: "603 Decline" }),
   { kind: "transferFailed", error: "603 Decline" });
 t("mwi waiting", M.parseMwi("Messages-Waiting: yes\r\nMessage-Account: sip:*97@pbx.example.com\r\nVoice-Message: 2/8 (0/2)\r\n"),
@@ -156,13 +157,14 @@ const BOOK = [
 ];
 t("contactName by address", M.contactName("sip:1001@pbx.example.com;user=phone", BOOK), "Front desk");
 t("contactName display-name form", M.contactName('"x" <sip:+15550100@gw.example.com>', BOOK), "Mum");
-t("contactName by unique user part from an IP", M.contactName("sip:1001@10.0.0.5", BOOK), "Front desk");
+t("contactName never lends a name to a caller at an IP literal", M.contactName("sip:1001@203.0.113.9", BOOK, "sip:me@pbx.example.com"), "");
 t("contactName by unique user part from the account's domain",
   M.contactName("sip:1001@pbx.example.com:5060", [{ name: "N", uri: "sip:1001@pbxname" }], "sip:me@pbx.example.com"), "N");
 t("contactName never lends a name to another domain's caller",
   M.contactName("sip:1001@attacker.example", BOOK, "sip:me@pbx.example.com"), "");
 t("contactName not for a short user part", M.contactName("sip:10@x", [{ name: "N", uri: "sip:10@y" }]), "");
-t("contactName not when ambiguous", M.contactName("sip:1001@10.0.0.9", BOOK.concat([{ name: "O", uri: "sip:1001@q" }])), "");
+t("contactName not when ambiguous",
+  M.contactName("sip:1001@pbx.example.com", [{ name: "A", uri: "sip:1001@a" }, { name: "B", uri: "sip:1001@b" }], "sip:me@pbx.example.com"), "");
 t("contactName unknown", M.contactName("sip:9@x", BOOK), "");
 t("contactName no book", M.contactName("sip:1001@pbx.example.com", undefined), "");
 t("hist label uses contact", M.historyLabel({ peer: "sip:1001@pbx.example.com" }, BOOK), "Front desk");

@@ -310,8 +310,10 @@ Item {
   // resolves the socket through the daemon's own pinned directory descriptor
   // instead of a bare path string, and the existing action watchdog and
   // bounded error buffer come for free.
+  // `--` before the command: a parameter is often caller-chosen -- a
+  // Call-ID may begin with "-" -- and must never be read as an option.
   function command(name, params) {
-    var args = ["send", "--token=" + panelToken, name]
+    var args = ["send", "--token=" + panelToken, "--", name]
     return run(params ? args.concat([params]) : args)
   }
 
@@ -464,7 +466,7 @@ Item {
       if (commandQueue.length >= maxQueuedCommands) return "too many commands queued"
       commandQueue = Model.queueDigits(commandQueue, d, panelToken)
     } else {
-      startAction(["send", "--token=" + panelToken, "sndcode", d])
+      startAction(["send", "--token=" + panelToken, "--", "sndcode", d])
     }
     sentDigits = (sentDigits + d).slice(-24)
     return ""

@@ -321,11 +321,11 @@ function validDigits(digits) {
 // Returns the new queue; never mutates the one given.
 function queueDigits(queue, digits, token) {
   var q = (queue || []).slice()
-  var head = ["send", "--token=" + String(token || "panel"), "sndcode"]
+  var head = ["send", "--token=" + String(token || "panel"), "--", "sndcode"]
   var last = q.length ? q[q.length - 1] : null
-  if (last && last.length === 4 && last[0] === head[0] && last[1] === head[1] && last[2] === head[2]
-      && (last[3] + digits).length <= 32) {
-    q[q.length - 1] = head.concat([last[3] + digits])
+  if (last && last.length === 5 && last[0] === head[0] && last[1] === head[1] && last[2] === head[2]
+      && last[3] === head[3] && (last[4] + digits).length <= 32) {
+    q[q.length - 1] = head.concat([last[4] + digits])
   } else {
     q.push(head.concat([digits]))
   }
@@ -416,11 +416,10 @@ function historyLabel(entry, contacts, aor) {
 
 // The saved name for a peer, matched on the bare address. Falls back to the
 // user part alone when exactly one contact has it (and it is not a two-digit
-// code) -- so an extension saved against the PBX's hostname still matches a
-// call that arrives from its IP -- but only when the call comes from the
-// account's own domain or an IP literal. Anyone can call from
-// sip:1001@their-own-host; that is not "Front desk". Mirrors
-// contact_name_for() in the CLI.
+// code) -- so an extension saved against another name for the PBX still
+// matches -- but only when the call comes from the account's own domain.
+// Anyone can call from sip:1001@their-own-host, or from an IP literal; that
+// is not "Front desk". Mirrors contact_name_for() in the CLI.
 function contactName(uri, contacts, aor) {
   var label = peerLabel(uri)
   var list = contacts || []
@@ -430,8 +429,7 @@ function contactName(uri, contacts, aor) {
   }
   var host = label.indexOf("@") > 0 ? label.substring(label.indexOf("@") + 1).split(":")[0].toLowerCase() : ""
   var domain = domainOf(aor).split(":")[0].toLowerCase()
-  var isIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(host) || /^\[[0-9a-f:.]+\]$/i.test(host)
-  if (!(host !== "" && (host === domain || isIp))) return ""
+  if (host === "" || host !== domain) return ""
   var user = label.split("@")[0]
   if (user.length < 3) return ""
   var found = ""

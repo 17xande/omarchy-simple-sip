@@ -169,7 +169,11 @@ check("a long name is clipped",
 book = [{"name": "Front desk", "uri": "sip:1001@pbx.example.com"},
         {"name": "Mum", "uri": "sip:+15550100@gw.example.com"}]
 check("a name is found by address", mod.contact_name_for("sip:1001@pbx.example.com;user=phone", book) == "Front desk")
-check("...or by user part alone when unambiguous", mod.contact_name_for("sip:1001@10.0.0.5", book) == "Front desk")
+check("...or by user part alone from the account's domain",
+      mod.contact_name_for("sip:1001@pbx.example.com", [{"name": "F", "uri": "sip:1001@pbxname"}], "pbx.example.com") == "F")
+check("...never for a caller at another host or an IP literal",
+      mod.contact_name_for("sip:1001@10.0.0.5", book, "pbx.example.com") == ""
+      and mod.contact_name_for("sip:1001@evil.example", book, "pbx.example.com") == "")
 check("...but not for a short one", mod.contact_name_for("sip:12@x", [{"name": "N", "uri": "sip:12@y"}]) == "")
 check("...nor an ambiguous one",
       mod.contact_name_for("sip:1001@z", book + [{"name": "Other", "uri": "sip:1001@elsewhere"}]) == "")
@@ -529,6 +533,22 @@ check("a NaN or Infinity timestamp is not passed on",
       and mod.finite("12.5") == 12.5 and mod.finite(None) == 0.0 and mod.finite("x") == 0.0)
 check("a history row with Infinity reads as finite",
       mod.history_record({"ts": float("inf"), "end": float("nan")})["ts"] == 0.0)
+
+# The CLI's own call-control subcommands (a regression once: they built a
+# Namespace without the token cmd_send reads).
+cli_tmp = tempfile.mkdtemp()
+os.chmod(cli_tmp, 0o700)
+for sub in (["dial", "sip:1@x"], ["answer"], ["hangup"]):
+    r = subprocess.run([sys.executable, "-I", CLI, *sub], capture_output=True, timeout=20,
+                       env={"HOME": cli_tmp, "PATH": "/usr/bin:/bin", "XDG_RUNTIME_DIR": cli_tmp,
+                            "OMARCHY_SIP_CONF": os.path.join(cli_tmp, "c")})
+    check(f"`omarchy-sip {sub[0]}` fails cleanly without a daemon, not with a traceback",
+          r.returncode == 1 and b"Traceback" not in r.stderr)
+r = subprocess.run([sys.executable, "-I", CLI, "send", "--token=t", "--", "hangup", "-abc"],
+                   capture_output=True, timeout=20,
+                   env={"HOME": cli_tmp, "PATH": "/usr/bin:/bin", "XDG_RUNTIME_DIR": cli_tmp})
+check("after `--`, a parameter that looks like an option is a parameter",
+      b"unrecognized" not in r.stderr and b"usage:" not in r.stderr + r.stdout)
 
 print("\nall passed" if not fails else f"\n{fails} FAILED")
 sys.exit(1 if fails else 0)

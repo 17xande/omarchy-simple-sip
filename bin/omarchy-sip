@@ -1051,10 +1051,9 @@ def read_contacts(dir_fd: int | None = None) -> list[dict]:
 def contact_name_for(uri: str, contacts: list[dict], domain: str = "") -> str:
     """The saved name for a peer, matched on the bare address; mirrors
     Model.contactName(). Falls back to the user part alone when exactly one
-    contact has it -- an extension saved against the PBX's name still
-    matches a call arriving from its IP -- but only for a call from the
-    account's own domain or an IP literal: anyone can call from
-    sip:1001@their-own-host."""
+    contact has it -- an extension saved against another name for the PBX
+    still matches -- but only for a call from the account's own domain:
+    anyone can call from sip:1001@their-own-host, or from an IP literal."""
     target = peer_uri(uri)
     if not target:
         return ""
@@ -1062,8 +1061,7 @@ def contact_name_for(uri: str, contacts: list[dict], domain: str = "") -> str:
         if c["uri"].partition(":")[2] == target.partition(":")[2]:
             return c["name"]
     host = target.partition("@")[2].split(":")[0].lower() if "@" in target else ""
-    is_ip = bool(re.fullmatch(r"\d{1,3}(\.\d{1,3}){3}|\[[0-9a-fA-F:.]+\]", host))
-    if not host or not (is_ip or host == domain.split(":")[0].lower()):
+    if not host or host != domain.split(":")[0].lower():
         return ""
     user = target.partition(":")[2].split("@", 1)[0]
     matches = [c for c in contacts if c["uri"].partition(":")[2].split("@", 1)[0] == user]
@@ -2166,7 +2164,8 @@ def cmd_restart(_args) -> int:
 
 
 def cmd_send(args) -> int:
-    token = args.token if TOKEN.fullmatch(args.token or "") else "cli"
+    token = getattr(args, "token", None) or "cli"
+    token = token if TOKEN.fullmatch(token) else "cli"
     send_command(command_json(args.name, args.params, token))
     return 0
 

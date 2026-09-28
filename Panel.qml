@@ -456,6 +456,9 @@ Panel {
       }
     }
     onPressed: function(buttonCode) {
+      // A click meant to open the panel can land just as a call rings; it
+      // must not answer or reject it. Inside the guard it only toggles.
+      if (buttonCode !== Qt.LeftButton && root.guardKey()) { root.toggle(); return }
       if (buttonCode === Qt.MiddleButton && sip.callState === "incoming") sip.answer()
       else if (buttonCode === Qt.RightButton && sip.onCall) sip.hangup()
       else root.toggle()
