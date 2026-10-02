@@ -3,7 +3,7 @@
 const fs = require("fs");
 const src = fs.readFileSync(require("path").join(__dirname, "..", "Model.js"), "utf8");
 const M = {};
-new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,validCallId,typingGuard,isKeypadKey,parseMwi,validDigits,queueDigits,optionChanges,pickOptions,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,accountUri,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,barTooltip,lastOutbound,callTitle,domainOf,historyGlyph,parseHistory,voicemailTarget,tipLine,contactName,matchContacts,redialTarget,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
+new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,buildId,daemonStale,validCallId,typingGuard,isKeypadKey,parseMwi,validDigits,queueDigits,optionChanges,pickOptions,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,accountUri,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,barTooltip,lastOutbound,callTitle,domainOf,historyGlyph,parseHistory,voicemailTarget,tipLine,contactName,matchContacts,redialTarget,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
 
 let fails = 0;
 const ESC = String.fromCharCode(27);
@@ -99,7 +99,14 @@ t("classify closed", M.classifyEvent({ type: "CALL_CLOSED", param: "Rejected by 
 t("classify closed keeps the call id", M.classifyEvent({ type: "CALL_CLOSED", id: "c9", param: "x" }).callId, "c9");
 t("classify reg ok", M.classifyEvent({ type: "REGISTER_OK", accountaor: "sip:a@x" }),
   { kind: "registration", registration: "registered", aor: "sip:a@x" });
-t("classify ctrl up", M.classifyEvent({ type: "CTRL_CONNECTED" }), { kind: "ctrl", connected: true });
+t("classify ctrl up", M.classifyEvent({ type: "CTRL_CONNECTED" }), { kind: "ctrl", connected: true, build: "" });
+t("classify ctrl up with a build", M.classifyEvent({ type: "CTRL_CONNECTED", build: "0a1b2c" }).build, "0a1b2c");
+t("a build id that is not hex is dropped", M.buildId("abc;rm -rf"), "");
+t("a daemon from another build is stale", M.daemonStale("aaaa", "bbbb", true), true);
+t("a daemon that reports no build is stale", M.daemonStale("", "bbbb", true), true);
+t("the same build is not stale", M.daemonStale("bbbb", "bbbb", true), false);
+t("nothing is stale until the installed build is known", M.daemonStale("aaaa", "", true), false);
+t("a daemon that is down is not restarted", M.daemonStale("aaaa", "bbbb", false), false);
 
 t("classify options keeps only known booleans",
   M.classifyEvent({ type: "OPTIONS", dnd: true, notifications: false, aec: "yes", other: true }),

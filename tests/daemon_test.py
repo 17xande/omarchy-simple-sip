@@ -6,7 +6,7 @@ all three here.
 
 Run: python3 tests/daemon_test.py
 """
-import importlib.machinery, importlib.util, json, os, subprocess, sys, tempfile
+import importlib.machinery, importlib.util, json, os, re, subprocess, sys, tempfile
 
 spec = importlib.util.spec_from_loader(
     "omarchy_sip",
@@ -608,6 +608,63 @@ check("a quoted name containing an address is not taken for the line's address",
       '"Bob <sip:x@h>" <sip:alice@h>' in left)
 check("removing a contact never removes the caller's block line",
       '<sip:x@h>;access=block' in left and '"X" <sip:x@h>' not in left)
+
+# ------------------------------------- REFER: accounts from earlier versions
+
+# The listed snapshot wrote accounts without call_transfer=no, and baresip
+# then dials whatever URI the far end's REFER names before the daemon can
+# hang it up. Every account line is hardened before baresip starts.
+LEGACY = ('"Alex" <sip:1001@pbx.example.com>;auth_user=1001;auth_pass=s3cret;transport=udp;'
+          'answermode=manual;regint=600;audio_codecs=opus/48000/2,PCMU/8000/1,PCMA/8000/1')
+hl = mod.harden_account_line
+check("a legacy account line gets call_transfer=no", hl(LEGACY) == LEGACY + ";call_transfer=no")
+check("...once", hl(hl(LEGACY)) == hl(LEGACY))
+check("an explicit yes is turned off, not out-voted by an appended no",
+      hl("<sip:a@b>;call_transfer=yes;regint=60") == "<sip:a@b>;call_transfer=no;regint=60")
+check("...whatever its case and spacing, as baresip matches it",
+      hl("<sip:a@b>; Call_Transfer = YES ;x=1") == "<sip:a@b>;call_transfer=no;x=1")
+check("...every occurrence, so no earlier one can win",
+      hl("<sip:a@b>;CALL_TRANSFER=yes;call_transfer=yes").lower().count("call_transfer=yes") == 0)
+check("a bare call_transfer flag is turned off too", hl("<sip:a@b>;call_transfer") == "<sip:a@b>;call_transfer=no")
+check("a display name that spells the key is left alone",
+      hl('"x;call_transfer=yes" <sip:a@b>') == '"x;call_transfer=yes" <sip:a@b>;call_transfer=no')
+check("a URI parameter inside the brackets is left alone",
+      hl("<sip:a@b;call_transfer=yes>;regint=60") == "<sip:a@b;call_transfer=yes>;regint=60;call_transfer=no")
+check("a bracket-less account line is hardened in its parameters",
+      hl("sip:a@b;regint=60") == "sip:a@b;regint=60;call_transfer=no")
+check("CRLF and trailing space survive", hl("<sip:a@b>;x=1 \r") == "<sip:a@b>;x=1;call_transfer=no \r")
+check("comments and blank lines are untouched", hl("# <sip:a@b>") == "# <sip:a@b>" and hl("") == "")
+check("a line with no closing quote or bracket is not guessed at",
+      hl('"broken <sip:a@b>') == '"broken <sip:a@b>' and hl("<sip:a@b;x") == "<sip:a@b;x")
+
+mig = tempfile.mkdtemp()
+os.chmod(mig, 0o700)
+orig_conf = mod.CONF_DIR
+mod.CONF_DIR = mig
+mfd = mod.conf_fd()
+with open(os.path.join(mig, "accounts"), "w") as fh:
+    fh.write("# kept\n" + LEGACY + "\n")
+mod.ensure_config()
+migrated = open(os.path.join(mig, "accounts")).read()
+check("ensure_config hardens an account saved by the listed snapshot",
+      migrated == "# kept\n" + LEGACY + ";call_transfer=no\n")
+check("...keeping the password byte for byte", "auth_pass=s3cret;" in migrated)
+check("...and the file private", oct(os.stat(os.path.join(mig, "accounts")).st_mode & 0o777) == "0o600")
+ino = os.stat(os.path.join(mig, "accounts")).st_ino
+mod.ensure_config()
+check("a hardened file is not rewritten again", os.stat(os.path.join(mig, "accounts")).st_ino == ino)
+with open(os.path.join(mig, "accounts"), "wb") as fh:
+    fh.write(LEGACY.encode() + b"\xff\n")
+try:
+    import contextlib, io as _io
+    with contextlib.redirect_stderr(_io.StringIO()):
+        mod.ensure_config()
+    check("an account file it cannot rewrite exactly stops the daemon from starting", False)
+except SystemExit:
+    check("an account file it cannot rewrite exactly stops the daemon from starting", True)
+mod.CONF_DIR = orig_conf
+
+check("the build id is a short hex hash of the helper", re.fullmatch(r"[0-9a-f]{16}", mod.build_id()) is not None)
 
 print("\nall passed" if not fails else f"\n{fails} FAILED")
 sys.exit(1 if fails else 0)

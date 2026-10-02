@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import hashlib
 import html
 import json
 import math
@@ -648,11 +649,91 @@ def account_transport() -> str:
     return value if value in ("udp", "tcp", "tls") else "udp"
 
 
+# A remote REFER makes baresip dial the URI the far end names, on this account,
+# before anything here can intervene (the daemon's second_call hangup arrives
+# after baresip has already created and connected the call). call_transfer=no
+# stops baresip accepting the REFER at all. `account set` writes it, but
+# accounts saved by an earlier version do not have it -- so it is enforced on
+# every account line before baresip starts, not only on new ones.
+_CALL_TRANSFER_PARAM = re.compile(r";[ \t]*call_transfer[ \t]*(?:=[^;]*)?(?=;|$)", re.IGNORECASE)
+
+
+def harden_account_line(line: str) -> str:
+    """`line` with call_transfer=no as its only call_transfer parameter.
+
+    Only the account-parameter part is touched -- after the closing `>` of
+    `<uri>`, or after the URI when there are no brackets -- so a display name
+    or a URI parameter that happens to spell call_transfer is left alone.
+    Every existing call_transfer is set to no rather than one appended: baresip
+    matches parameter names case-insensitively and the first match wins, so an
+    appended `;call_transfer=no` behind a `;Call_Transfer=yes` would lose.
+    Comments, blank lines and everything else are returned unchanged.
+    """
+    ending = "\r" if line.endswith("\r") else ""
+    body = line[: len(line) - len(ending)]
+    stripped = body.strip()
+    if not stripped or stripped.startswith("#"):
+        return line
+    start = len(body) - len(body.lstrip())
+    rest = body[start:]
+    head = ""
+    if rest.startswith('"'):
+        end = rest.find('"', 1)
+        if end < 0:
+            return line            # not an account line baresip would load either
+        head, rest = rest[: end + 1], rest[end + 1 :]
+    stripped_rest = rest.lstrip()
+    head += rest[: len(rest) - len(stripped_rest)]
+    rest = stripped_rest
+    if rest.startswith("<"):
+        close = rest.find(">")
+        if close < 0:
+            return line
+        head, params = head + rest[: close + 1], rest[close + 1 :]
+    else:
+        semi = rest.find(";")
+        head, params = (head + rest, "") if semi < 0 else (head + rest[:semi], rest[semi:])
+    trailing = params[len(params.rstrip()) :]
+    params = params.rstrip()
+    if _CALL_TRANSFER_PARAM.search(params):
+        params = _CALL_TRANSFER_PARAM.sub(";call_transfer=no", params)
+    else:
+        params += ";call_transfer=no"
+    return body[:start] + head + params + trailing + ending
+
+
+def harden_accounts(fd: int) -> bool:
+    """Enforce call_transfer=no on every account line, in place: only that
+    parameter changes, every other byte is kept. read_exact refuses an
+    oversized or non-UTF-8 file -- the daemon then does not start, rather than
+    start with REFER accepted. Returns whether the file was rewritten."""
+    text = read_exact(ACCOUNTS, fd, MAX_ACCOUNTS_FILE)
+    if not text:
+        return False
+    hardened = "\n".join(harden_account_line(line) for line in text.split("\n"))
+    if hardened == text:
+        return False
+    write_private(ACCOUNTS, hardened, fd)
+    return True
+
+
+def build_id() -> str:
+    """A short hash of this helper's own source: what a running daemon was
+    started from, compared with what is installed now, so a daemon left
+    running across a plugin update can be noticed and restarted."""
+    try:
+        with open(SELF, "rb") as fh:
+            return hashlib.sha256(fh.read(4 << 20)).hexdigest()[:16]
+    except OSError:
+        return ""
+
+
 def ensure_config() -> None:
     fd = conf_fd()
     for name in (ACCOUNTS, CONTACTS):
         if not exists_at(name, fd):
             write_private(name, "", fd)
+    harden_accounts(fd)
     interface = f"net_interface\t\t{SIP_INTERFACE}" if SIP_INTERFACE else ""
     # Echo cancellation, opt-in: it is what makes laptop speakers usable
     # without a headset, and costs CPU and a little latency with one. It is an
@@ -1746,12 +1827,16 @@ def cap_baresip_log(log_fd: int, limit: int = MAX_BARESIP_LOG) -> None:
         pass
 
 
+DAEMON_BUILD = ""
+
+
 def cmd_daemon(_args) -> int:
     if BARESIP is None:
         die("baresip is not installed (omarchy pkg add baresip)")
     if open_dbus_connection is None:
         die("python-jeepney is not installed (omarchy pkg add python-jeepney)")
-    global _HUB
+    global _HUB, DAEMON_BUILD
+    DAEMON_BUILD = build_id()       # before anything else: the code actually running
     ensure_config()
     rfd = run_fd()
 
@@ -1810,7 +1895,7 @@ def cmd_daemon(_args) -> int:
 
     # Greeting rather than a plain journal entry: the panel's event listener
     # reconnects throughout the daemon's life and needs this on every connect.
-    hub.greet(json.dumps({"type": "CTRL_CONNECTED"}, separators=(",", ":")))
+    hub.greet(json.dumps({"type": "CTRL_CONNECTED", "build": DAEMON_BUILD}, separators=(",", ":")))
 
     options = read_options()
     hub.greet(json.dumps({"type": "OPTIONS", **options}, separators=(",", ":")))
@@ -2627,6 +2712,7 @@ def cmd_status(_args) -> int:
         "reginfo": clip_reply(request("reginfo", timeout=3)) if up else None,
         "calls": clip_reply(request("listcalls", timeout=3)) if up else None,
         "options": read_options(),
+        "build": build_id(),
     }
     print(json.dumps(snapshot, separators=(",", ":")))
     return 0

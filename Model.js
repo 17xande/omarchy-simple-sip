@@ -35,7 +35,7 @@ function classifyEvent(ev, panelToken) {
   switch (type) {
   // -- our own synthetic bridge events
   case "CTRL_CONNECTED":
-    return { kind: "ctrl", connected: true }
+    return { kind: "ctrl", connected: true, build: buildId(ev && ev.build) }
   case "CTRL_DISCONNECTED":
   case "CTRL_FAILED":
     return { kind: "ctrl", connected: false, error: (ev && ev.reason) || "" }
@@ -117,6 +117,20 @@ function optionChanges(wanted, current, pending, callIdle) {
     out.push([key, wanted[key]])
   }
   return out
+}
+
+// A helper build id (hex, as build_id() makes it), or "" for anything else.
+function buildId(value) {
+  var v = String(value || "")
+  return /^[0-9a-f]{1,64}$/.test(v) ? v : ""
+}
+
+// Is the running daemon older than the installed helper? Only when both are
+// known: an old daemon that reports no build at all is stale too, since every
+// build that reports one also enforces call_transfer=no at start.
+function daemonStale(daemonBuild, installedBuild, connected) {
+  if (!connected || installedBuild === "") return false
+  return daemonBuild !== installedBuild
 }
 
 // ------------------------------------------------------- prose from responses

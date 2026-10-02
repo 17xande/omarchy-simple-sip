@@ -552,9 +552,18 @@ sends them.
   and accept, mute, hold, tones and transfer — which act on the current call — would
   act on the newcomer. A refused second call leaves no trace: it is not logged or
   notified.
-- The far end cannot make baresip dial. Accounts are written with
-  `call_transfer=no`, so a remote REFER is not followed, and the daemon hangs up, by
-  its id, any call that appears while another is up, whatever placed it.
+- The far end cannot make baresip dial. A remote REFER would have baresip place a
+  call to a URI the other party chose, on your account — and it does so before
+  anything outside baresip can step in. So `call_transfer=no` is enforced on every
+  account line before baresip starts, including accounts saved by earlier versions
+  (any existing `call_transfer` value is replaced, not out-voted; nothing else in the
+  line changes). An accounts file that cannot be rewritten exactly stops the daemon
+  from starting rather than let it start with REFER accepted. As a second line, the
+  daemon hangs up, by its id, any call that appears while another is up.
+- A daemon left running across a plugin update keeps running the old code. It
+  reports the build it started from; when that differs from the installed helper, the
+  panel restarts it as soon as no call is ringing or up, which re-applies all of the
+  above.
 - A D-Bus message the parser rejects — anyone on the session bus can send one to the
   daemon — replaces that connection rather than ending the daemon, and with it the
   call. Only a flood (more than five a minute) still ends it.

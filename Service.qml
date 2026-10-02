@@ -133,6 +133,13 @@ Item {
   // those are resumed -- never something the person paused themselves.
   property var pausedPlayers: []
   property var pendingOptions: ({})
+  // The helper build the running daemon started from, and the one installed
+  // now. They differ after a plugin update until the daemon restarts -- and
+  // until then it runs the old code, with whatever the old code allowed.
+  property string daemonBuild: ""
+  property string installedBuild: ""
+  property bool ctrlSeen: false
+  property bool staleRestartSent: false
   // Do Not Disturb as the panel should show it: a toggle still on its way to
   // the daemon counts, so the row flips at once.
   readonly property bool dnd: typeof pendingOptions.dnd === "boolean" ? pendingOptions.dnd
@@ -284,6 +291,19 @@ Item {
       delete undo[key]
       pendingOptions = undo
     }
+  }
+
+  // A daemon left running across a plugin update keeps the old code -- and
+  // the old code's account handling -- until something restarts it. Restart
+  // it here, from one copy of the widget, once per mismatch, and never with
+  // a call ringing or up. `restart` regenerates the config and re-applies the
+  // account hardening (call_transfer=no) before baresip starts again.
+  function restartIfStale() {
+    if (!optionSync || staleRestartSent || !ctrlSeen) return
+    if (!Model.daemonStale(daemonBuild, installedBuild, daemonUp)) return
+    if (callState !== "idle") return
+    staleRestartSent = true
+    run(["restart"])
   }
 
   function toggleDnd() {
@@ -441,7 +461,10 @@ Item {
   property string previousCallState: "idle"
   onCallStateChanged: {
     if (previousCallState === "idle" && callState !== "idle") pauseMedia()
-    else if (callState === "idle") resumeMedia()
+    else if (callState === "idle") {
+      resumeMedia()
+      Qt.callLater(restartIfStale)   // an update waiting for the call to end
+    }
     previousCallState = callState
   }
 
@@ -574,6 +597,9 @@ Item {
       daemonUp = update.connected
       if (update.connected) {
         eventsRetryMs = eventsRetryMinMs   // a real connection means the daemon is back
+        daemonBuild = update.build
+        ctrlSeen = true
+        Qt.callLater(restartIfStale)
       }
       if (!update.connected) {
         callState = "idle"
@@ -681,6 +707,8 @@ Item {
       daemonOptions = Model.pickOptions(status.options)
       syncOptions()
     }
+    installedBuild = Model.buildId(status.build)
+    restartIfStale()
 
     // reginfo is authoritative on startup; events take over from there.
     if (status.reginfo && status.reginfo.data !== undefined) {
