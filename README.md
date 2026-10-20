@@ -165,13 +165,17 @@ including the stored SIP password.
 | Account settings | click the gear row | `s` | `omarchy-shell io.github.17xande.simple-sip view setup` |
 | Back to the main screen | — | — | `omarchy-shell io.github.17xande.simple-sip view main` |
 
-`view` opens the panel straight onto a screen, so a keybinding can take you to
-Contacts: `omarchy-shell io.github.17xande.simple-sip view contacts`. It takes one of `main`, `contacts`, `history`,
-`keypad` (the main screen with the dial keypad open) or `setup`. It only moves an
-idle phone -- during a ringing or live call it answers `refused: busy` and leaves
-the screen with Answer and Hang up on it -- and the screens need the daemon and an
-account, so it refuses those too; `setup` still works with the daemon down, as the
-gear row does.
+`view` opens the panel on the focused monitor, straight onto a screen, so a keybinding
+can take you to Contacts: `omarchy-shell io.github.17xande.simple-sip view contacts`.
+It takes one of `main`, `contacts`, `history`, `keypad` (the main screen with the
+dial keypad open) or `setup`. It only moves an idle phone -- during a ringing or
+live call it answers `refused: busy` and leaves the screen with Answer and Hang up
+on it. Every screen but `setup` (`main` included) needs the daemon and an account,
+and is refused without them; `setup` still works with the daemon down, as the gear
+row does. It also refuses while a contact or account form holds unsaved edits. Unlike
+`open`, `show` and `toggle`, `view` briefly swallows keys after opening, as a clicked
+phone link does: it lands the keyboard in a field or on rows where Enter acts, and
+the call cannot tell a keybinding from a script. `isOpen` answers `open` or `closed`.
 
 Every IPC call answers `ok`, or `refused: <why>` when there was nothing to do. A
 bare extension or phone number is completed with your account's domain, so `1001`

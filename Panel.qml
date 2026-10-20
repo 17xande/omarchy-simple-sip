@@ -548,8 +548,10 @@ Panel {
   implicitHeight: button.implicitHeight
 
   onOpenedChanged: if (opened) {
-    // Always the main screen, and never a form left over from last time.
+    // Always the main screen, and never a form or keypad left over from last time.
     view = "main"
+    setupOpen = false
+    dialPadOpen = false
     contactOpen = false
     disarm()
     cursorActive = false
@@ -635,35 +637,70 @@ Panel {
       return reason ? "refused: " + reason : (sip.dnd ? "on" : "off")
     }
     function view(name: string): string { return root.showView(name) }
+    function isOpen(): string { return root.anyOpen() ? "open" : "closed" }
     function status(): string {
       return sip.callState + " " + (sip.peer || "-") + " " + sip.registration
     }
   }
 
-  // IPC `view`: open the panel on a given screen without a key press. The
-  // state is set after summonHere() -- opening resets the panel to its main
-  // screen (onOpenedChanged) -- and again on the next turn, for a shell that
-  // opens the panel a moment later. Already open, `opened` does not change and
-  // the first assignment is the one that counts. Both are plain assignments, so
-  // doing it twice is harmless.
+  // The copies of this widget (one per monitor); this one alone when the bar
+  // does not say.
+  function liveCopies() {
+    var items = bar && typeof bar.moduleWidgets === "function" ? bar.moduleWidgets(moduleName) : []
+    return items && items.length > 0 ? items : [root]
+  }
+
+  // Why this copy should not be moved to another screen: something typed into
+  // a form and not yet saved. "" when nothing would be lost.
+  function unsavedReason() {
+    if (contactOpen && contactDirty()) return "unsaved changes in the contact form"
+    if (setupForm.visible && setupTouched) return "unsaved changes in the account form"
+    return ""
+  }
+
+  // IPC `view`: open the panel on a given screen without a key press.
+  // summonHere() opens the focused monitor's copy, which is not necessarily
+  // the one that got this call, and opening resets that copy to its main
+  // screen (onOpenedChanged) -- synchronously, so by the time it returns the
+  // reset has run and the plan can be applied on top. Only copies that are
+  // open receive it; one that stayed closed is left alone. Guarded like a
+  // prefill: the plan lands the keyboard in a field, or on rows where Enter
+  // acts, and IPC cannot tell a keybinding from a script.
   function showView(name) {
     var plan = Model.viewPlan(name, { callState: sip.callState, daemonUp: sip.daemonUp,
                                       configured: sip.configured })
     if (plan.refused) return "refused: " + plan.refused
+    var copies = liveCopies()
+    for (var i = 0; i < copies.length; i++) {
+      var why = typeof copies[i].unsavedReason === "function" ? copies[i].unsavedReason() : ""
+      if (why) return "refused: " + why
+    }
     summonHere()
-    applyViewPlan(plan)
-    Qt.callLater(function() { if (sip.callState === "idle") root.applyViewPlan(plan) })
-    return "ok"
+    var applied = 0
+    var after = liveCopies()
+    for (var j = 0; j < after.length; j++) {
+      if (after[j].opened === true && typeof after[j].applyViewPlan === "function") {
+        after[j].applyViewPlan(plan)
+        applied++
+      }
+    }
+    return applied > 0 ? "ok" : "refused: the panel did not open"
+  }
+
+  // Whether any copy of the panel is open.
+  function anyOpen() {
+    var items = liveCopies()
+    for (var i = 0; i < items.length; i++) if (items[i].opened === true) return true
+    return false
   }
 
   function applyViewPlan(plan) {
+    typingGuardUntil = Date.now() + typingQuietMs
     contactOpen = false
     setupOpen = plan.setup
     view = plan.view
     dialPadOpen = plan.dialPad
     disarm()
-    cursorActive = false
-    cursorIndex = 0
   }
 
   function ipcResult(reason) {
