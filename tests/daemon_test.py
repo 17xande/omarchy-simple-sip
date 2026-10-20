@@ -227,6 +227,116 @@ check("contacts remove deletes it, and only it",
 check("removing an unknown contact says so", contacts("remove", "sip:1001@pbx").returncode != 0)
 check("the contacts file is private", oct(os.stat(os.path.join(cdir, "contacts")).st_mode & 0o777) == "0o600")
 
+# `--opt=value` and `--`: a name or an address that starts with "-" is a value,
+# not an option, and `contacts add -- <uri>` is how the panel passes one.
+rdir = os.path.join(ctmp, "r")
+os.mkdir(rdir, 0o700)
+
+
+def rcontacts(*args):
+    env = {"HOME": ctmp, "PATH": "/usr/bin:/bin", "OMARCHY_SIP_CONF": rdir, "XDG_RUNTIME_DIR": ctmp}
+    return subprocess.run([sys.executable, "-I", CLI, "contacts", *args], env=env,
+                          capture_output=True, timeout=20)
+
+
+def rtext():
+    return open(os.path.join(rdir, "contacts")).read()
+
+
+r = rcontacts("add", "--name=-Dash", "--", "sip:1001@pbx")
+check("contacts add takes its address after `--` and a name that starts with a dash",
+      r.returncode == 0 and json.loads(r.stdout) == [{"name": "-Dash", "uri": "sip:1001@pbx"}])
+check("contacts remove takes its address after `--` too",
+      rcontacts("remove", "--", "sip:1001@pbx").returncode == 0 and json.loads(rcontacts().stdout) == [])
+check("an address that looks like an option is refused as an address, not parsed as one",
+      rcontacts("add", "--name=x", "--", "--help").returncode != 0 and not os.path.getsize(os.path.join(rdir, "contacts")))
+
+# ---------------------------------------------------------- contacts --replace
+
+with open(os.path.join(rdir, "contacts"), "w") as fh:
+    fh.write('# mine\n"Spam" <sip:old@pbx>;access=block\n"Old" <sip:old@pbx>;presence=p2p\n'
+             '"Twin" <sip:old@pbx>;presence=none\n"Other" <sip:other@pbx>\n')
+r = rcontacts("add", "--name=New", "--replace=sip:old@pbx", "--", "sip:new@pbx")
+check("--replace moves a contact to a new name and address",
+      r.returncode == 0 and [c["uri"] for c in json.loads(r.stdout)] == ["sip:new@pbx", "sip:old@pbx", "sip:other@pbx"])
+check("... keeping the replaced line's parameters, in its place",
+      '"New" <sip:new@pbx>;presence=p2p\n"Twin"' in rtext())
+check("... only the first matching line", '"Twin" <sip:old@pbx>;presence=none' in rtext())
+check("... never the caller block on the same address",
+      '"Spam" <sip:old@pbx>;access=block' in rtext() and "# mine" in rtext())
+before = rtext()
+r = rcontacts("add", "--name=X", "--replace=sip:old@pbx", "--", "sip:other@pbx")
+check("--replace onto an address that is already a contact is refused",
+      r.returncode != 0 and b"already a contact" in r.stderr and rtext() == before)
+r = rcontacts("add", "--name=X", "--replace=sip:nobody@pbx", "--", "sip:fresh@pbx")
+check("--replace of a contact that is not there is refused, and adds nothing",
+      r.returncode != 0 and rtext() == before)
+r = rcontacts("add", "--name=X", "--replace=sip:spam-only@pbx", "--", "sip:fresh@pbx")
+check("... and a blocked caller is not a contact to replace",
+      r.returncode != 0 and rtext() == before)
+with open(os.path.join(rdir, "contacts"), "a") as fh:
+    fh.write('"Spam2" <sip:blocked@pbx>;access=block\n')
+before = rtext()
+check("--replace cannot take over a blocked address, nor move onto one",
+      rcontacts("add", "--name=X", "--replace=sip:blocked@pbx", "--", "sip:fresh@pbx").returncode != 0
+      and rtext() == before)
+r = rcontacts("add", "--name=X", "--replace=sip:other@pbx", "--", "sip:blocked@pbx")
+check("--replace cannot move a contact onto a blocked address (it would unblock the caller)",
+      r.returncode != 0 and b"blocked" in r.stderr and rtext() == before)
+r = rcontacts("add", "--name=X", "--", "sip:blocked@pbx")
+check("adding a contact on a blocked address is refused too",
+      r.returncode != 0 and b"blocked" in r.stderr and rtext() == before)
+r = rcontacts("add", "--name=Renamed", "--replace=sip:other@pbx", "--", "sip:other@pbx")
+check("--replace with the same address is a rename",
+      r.returncode == 0 and '"Renamed" <sip:other@pbx>' in rtext() and rtext().count("sip:other@pbx") == 1)
+check("--replace needs a sip: address to replace",
+      rcontacts("add", "--name=X", "--replace=tel:123", "--", "sip:z@pbx").returncode != 0)
+check("--replace belongs to add",
+      rcontacts("remove", "--replace=sip:new@pbx", "--", "sip:new@pbx").returncode != 0)
+check("without --replace adding still renames in place",
+      rcontacts("add", "--name=Plain", "--", "sip:new@pbx").returncode == 0 and '"Plain" <sip:new@pbx>;presence=p2p' in rtext())
+
+# -------------------------------------------------------- history --clear
+
+hdir = os.path.join(ctmp, "h")
+os.mkdir(hdir, 0o700)
+
+
+def jl(raw):
+    """JSON from a command's output, or {} when it printed none."""
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return {}
+
+
+def hist(*args):
+    env = {"HOME": ctmp, "PATH": "/usr/bin:/bin", "OMARCHY_SIP_CONF": hdir, "XDG_RUNTIME_DIR": ctmp}
+    return subprocess.run([sys.executable, "-I", CLI, "history", *args], env=env,
+                          capture_output=True, timeout=20)
+
+
+hpath = os.path.join(hdir, "history.jsonl")
+with open(hpath, "w") as fh:
+    for i in range(3):
+        fh.write(json.dumps({"ts": 1000 + i, "direction": "in", "peer": f"sip:{i}@pbx", "missed": True,
+                             "duration": 0, "reason": "", "end": 1000 + i}) + "\n")
+os.link(hpath, hpath + ".planted")
+check("history lists the calls before a clear", len(jl(hist("--limit=50").stdout).get("calls", [])) == 3)
+r = hist("--clear", "--limit=50")
+shown = jl(r.stdout)
+check("history --clear empties the log and prints what plain history prints",
+      r.returncode == 0 and shown.get("calls") == [] and shown.get("unseenMissed") == 0 and "seenTs" in shown)
+check("... for good", jl(hist("--limit=50").stdout).get("calls") == [] and os.path.getsize(hpath) == 0)
+check("... by replacing the file, never truncating it in place",
+      open(hpath + ".planted").read().count("\n") == 3)
+check("... leaving it private", oct(os.stat(hpath).st_mode & 0o777) == "0o600")
+tracker = mod.CallTracker(mod.dir_fd_for(hdir))
+tracker.handle({"type": "CALL_INCOMING", "id": "z", "peeruri": "sip:z@pbx"})
+tracker.handle({"type": "CALL_CLOSED", "id": "z", "param": "gave up"})
+check("the log keeps recording after a clear", len(jl(hist("--limit=50").stdout).get("calls", [])) == 1)
+check("a clear with no log is still a clear", (os.unlink(hpath), hist("--clear").returncode)[1] == 0)
+
 # ------------------------------------------------------------ click-to-call
 
 for url, want in (

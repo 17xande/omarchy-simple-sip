@@ -38,12 +38,42 @@ Panel {
   property bool setupTouched: false
   property bool keypadOpen: false
   property bool transferOpen: false
-  // The address being saved as a contact, or "" when the form is closed.
-  property string contactUri: ""
+  // The dial keypad under the dial field. Remembered for the shell session
+  // only: like the panel itself, it starts from the same place every time.
+  property bool dialPadOpen: false
+  // Which screen the idle panel shows: "main", "contacts" or "history". Only
+  // reachable with no call ringing or up; a call forces it back to "main" so
+  // Answer and Hang up are never hidden behind a list.
+  property string view: "main"
+  property string contactQuery: ""
+  // The contact form is open. `contactOriginal` is the address the contact is
+  // saved under now ("" for a new one), which is what an edit replaces.
+  property bool contactOpen: false
+  property string contactOriginal: ""
+  property string contactError: ""
+  // What the next press confirms, for a few seconds: "delete:<uri>" or
+  // "clear" (the call log). Any cursor move, or the clock, takes it back.
+  property string armed: ""
+  // The setup form's codec switches (ids, see Model.CODEC_CHOICES), what the
+  // account has stored now, and whether that is a list written by hand.
+  property var codecsOn: Model.DEFAULT_CODECS.slice()
+  property string codecsStored: Model.codecArg(Model.DEFAULT_CODECS)
+  property bool codecsCustom: false
+  // What the outbound and STUN fields were filled from, and whether the person
+  // has touched each: a field is only sent when they have and it differs.
+  property string outboundStored: ""
+  property string stunStored: ""
+  property bool outboundEdited: false
+  property bool stunEdited: false
+  property bool codecsEdited: false
   // End of the quiet window after an auto-open; see Model.typingGuard.
   property double typingGuardUntil: 0
   readonly property int typingQuietMs: 1500
   property double lastPrefillAt: 0
+  property string lastPrefill: ""
+  // What the contact form's fields held when it opened, to tell edits from not.
+  property string contactBaseName: ""
+  property string contactBaseNumber: ""
   readonly property int prefillIntervalMs: 3000
 
   // True when this key must be swallowed because the panel opened by itself
@@ -63,11 +93,44 @@ Panel {
   // They differ after Down from the dial field: it stays on screen while the
   // cursor walks the rows under it.
   readonly property bool textInputActive: dialRow.visible || setupForm.visible
-                                          || transferRow.visible || contactRow.visible
+                                          || transferRow.visible || contactForm.visible
+                                          || contactsSearchRow.visible
   readonly property bool fieldFocused: dialField.activeFocus || transferField.activeFocus
-                                       || contactField.activeFocus || uriField.activeFocus
+                                       || contactsSearch.activeFocus || formFocused
+                                       || contactNameField.activeFocus || contactNumberField.activeFocus
+                                       || uriField.activeFocus
                                        || authField.activeFocus || displayField.activeFocus
                                        || passwordField.activeFocus || transportField.popupOpen
+                                       || outboundField.activeFocus || stunField.activeFocus
+
+  // Focus anywhere inside one of the two forms, whatever it is: a switch, a
+  // button, the dropdown's trigger. The key catcher takes Tab, Space, Enter and
+  // Escape before any of them could, so it must stand aside for all of them,
+  // not only for the text fields -- which is also what lets Tab walk the form.
+  readonly property bool formFocused: {
+    var win = setupForm.Window.window
+    var item = win ? win.activeFocusItem : null
+    return item !== null && (within(item, setupForm) || within(item, contactForm))
+  }
+
+  function within(item, ancestor) {
+    for (var p = item; p; p = p.parent) if (p === ancestor) return true
+    return false
+  }
+
+  // A form is taller than the panel; keep the control that has focus in view.
+  function revealFocus() {
+    var win = setupForm.Window.window
+    var item = win ? win.activeFocusItem : null
+    if (!item || !(within(item, setupForm) || within(item, contactForm))) return
+    var top = item.mapToItem(panelFlick.contentItem, 0, 0).y
+    var bottom = top + item.height
+    var margin = Style.space(8)
+    if (top - margin < panelFlick.contentY) panelFlick.contentY = Math.max(0, top - margin)
+    else if (bottom + margin > panelFlick.contentY + panelFlick.height)
+      panelFlick.contentY = Math.min(Math.max(0, panelFlick.contentHeight - panelFlick.height),
+                                     bottom + margin - panelFlick.height)
+  }
 
   // ...and when the last one leaves the screen, the keyboard has to come back.
   // Nothing else claims it: dialField takes focus when it appears and no one
@@ -79,18 +142,82 @@ Panel {
   }
 
   // The contact form closing strands focus on a hidden field just as the
-  // others do, but the dial field may still be on screen to take it.
-  onContactUriChanged: if (contactUri === "" && opened) {
+  // others do, but the search or dial field may still be on screen to take it.
+  onContactOpenChanged: {
+    disarm()
+    if (!contactOpen && opened) giveFocusBack()
+  }
+
+  function giveFocusBack() {
     Qt.callLater(function() {
-      if (dialField.visible) dialField.forceActiveFocus()
+      if (contactsSearch.visible) contactsSearch.forceActiveFocus()
+      else if (dialField.visible) dialField.forceActiveFocus()
       else keyCatcher.forceActiveFocus()
     })
+  }
+
+  // Arrival on a screen: its search field takes the keyboard, a list without
+  // one starts with the cursor on its first row, and a confirmation pending
+  // on the last screen is not carried to this one.
+  onViewChanged: {
+    disarm()
+    contactQuery = ""
+    cursorActive = view === "history"
+    cursorIndex = 0
+    if (panelFlick) panelFlick.contentY = 0
+    if (opened) giveFocusBack()
+  }
+
+  onCursorIndexChanged: disarm()
+
+  function disarm() {
+    armed = ""
+    armTimer.stop()
+  }
+
+  function arm(what) {
+    armed = what
+    armTimer.restart()
+  }
+
+  PointerMoveGate {
+    id: pointerGate
+    referenceItem: column
+  }
+
+  onActionsChanged: pointerGate.reset()
+
+  Timer {
+    id: armTimer
+    interval: 3000
+    onTriggered: root.armed = ""
+  }
+
+  // The screens are only there when nothing else is: the account is up, no
+  // call, and neither form open.
+  readonly property bool idleScreen: sip.daemonUp && sip.configured && sip.callState === "idle"
+                                     && !setupForm.visible && !contactForm.visible
+  readonly property bool contactsShown: view === "contacts" && idleScreen
+  readonly property var shownContacts: Model.filterContacts(contactQuery, sip.contacts)
+  // More calls in the log than the main screen lists (all of them, when it
+  // lists none): the way into the whole log.
+  readonly property bool moreCalls: sip.history.length > sip.historyLimit
+  readonly property bool mainIdle: idleScreen && view === "main"
+
+  // Said under the list when there is nothing in it.
+  readonly property string emptyText: {
+    if (contactsShown && shownContacts.length === 0)
+      return sip.contacts.length === 0 ? "No contacts yet — save one from Recent calls or add one"
+                                        : "No contact matches"
+    if (view === "history" && idleScreen && sip.history.length === 0) return "No calls yet"
+    return ""
   }
 
   readonly property var actions: buildActions()
   readonly property var suggestActions: actions.filter(function(a) { return a.section === "suggest" })
   readonly property var primaryActions: actions.filter(function(a) { return a.section === "primary" })
   readonly property var historyActions: actions.filter(function(a) { return a.section === "history" })
+  readonly property var moreActions: actions.filter(function(a) { return a.section === "more" })
 
   // Cursor indices are assigned here, once, so the two Repeaters below can
   // render different sections while sharing a single keyboard cursor.
@@ -110,7 +237,8 @@ Panel {
       ? [{ id: "start", label: "Start SIP daemon", glyph: "\uf04b" }]
       : [{ id: "start", label: "Start SIP daemon", glyph: "\uf04b" },
          { id: "setup", label: "Account settings", glyph: "\uf013" }]
-    if (setupForm.visible) return []
+    // A call is answered, hung up and muted whatever form was open: those rows
+    // come before the forms, which a call closes (see onCallStateChanged).
     if (sip.callState === "incoming") return [
       { id: "answer", label: "Answer", glyph: "\uf095" },
       { id: "reject", label: "Reject", glyph: "\uf00d" }
@@ -129,7 +257,11 @@ Panel {
       inCall.push({ id: "hangup", label: "Hang up", glyph: "\uf00d", hint: "b" })
       return inCall
     }
+    if (setupForm.visible) return []
+    if (contactForm.visible) return []
     var rows = []
+    if (view === "contacts") return contactRows(rows)
+    if (view === "history") return historyRows(rows)
     // Contacts matching what is typed, first, right under the field.
     for (var k = 0; k < suggestions.length; k++) {
       rows.push({ id: "call:" + suggestions[k].uri, label: suggestions[k].name || Model.peerShort(suggestions[k].uri),
@@ -145,25 +277,60 @@ Panel {
     }
     rows.push({ id: "dnd", label: "Do not disturb", glyph: "\uf1f6", hint: "q",
                 meta: sip.dnd ? "On — calls go to voicemail" : "", urgent: sip.dnd, section: "primary" })
+    // nf-fa-address_book
+    rows.push({ id: "contacts", label: "Contacts", glyph: "\uf2b9", hint: "o",
+                meta: sip.contacts.length > 0 ? sip.contacts.length + " saved" : "", section: "primary" })
     rows.push({ id: "setup", label: "Account settings", glyph: "\uf013", section: "primary" })
     // Recent calls are actions too: they share the cursor model, so Enter on a
     // row redials it and the keyboard behaves the same everywhere.
-    for (var i = 0; i < sip.history.length && i < sip.historyLimit; i++) {
-      var entry = sip.history[i]
-      rows.push({
-        id: "redial:" + Model.redialTarget(entry),
-        label: Model.historyLabel(entry, sip.contacts, sip.aor),
-        contactUri: Model.redialTarget(entry),
-        glyph: Model.historyGlyph(entry),
-        meta: Model.historyMeta(entry, clock.now),
-        urgent: Model.historyIsMissed(entry),
-        section: "history"
-      })
+    for (var i = 0; i < sip.history.length && i < sip.historyLimit; i++) rows.push(callRow(sip.history[i]))
+    // nf-fa-history
+    if (moreCalls) rows.push({ id: "all-calls", label: "All calls", glyph: "\uf1da", hint: "y",
+                               meta: sip.history.length + " calls", section: "more" })
+    return rows
+  }
+
+  function callRow(entry) {
+    return {
+      id: "redial:" + Model.redialTarget(entry),
+      label: Model.historyLabel(entry, sip.contacts, sip.aor),
+      contactUri: Model.redialTarget(entry),
+      glyph: Model.historyGlyph(entry),
+      meta: Model.historyMeta(entry, clock.now),
+      urgent: Model.historyIsMissed(entry),
+      section: "history"
+    }
+  }
+
+  // The contacts screen: a way to add one, then everybody the search matches.
+  // The delete confirmation lives in the row's own meta, where the eye already is.
+  function contactRows(rows) {
+    // nf-fa-user_plus
+    rows.push({ id: "contact-new", label: "New contact", glyph: "\uf234", section: "primary" })
+    for (var i = 0; i < shownContacts.length; i++) {
+      var c = shownContacts[i]
+      var sure = armed === "delete:" + c.uri
+      rows.push({ id: "contact:" + c.uri, label: c.name || Model.peerShort(c.uri),
+                  meta: sure ? "Press x again to delete" : Model.peerLabel(c.uri), urgent: sure,
+                  glyph: "\uf095", contactUri: c.uri, saved: true, section: "history" })
+    }
+    return rows
+  }
+
+  // The whole call log, then the one destructive row, which takes two presses.
+  function historyRows(rows) {
+    for (var i = 0; i < sip.history.length; i++) rows.push(callRow(sip.history[i]))
+    if (sip.history.length > 0) {
+      var sure = armed === "clear"
+      // nf-fa-trash
+      rows.push({ id: "clear-history", glyph: "\uf1f8", urgent: true, section: "more",
+                  label: sure ? "Clear all " + sip.history.length + " calls? Press again" : "Clear history" })
     }
     return rows
   }
 
   function activate(id) {
+    if (id !== "clear-history") disarm()
     switch (id) {
     case "start":  sip.startDaemon(); break
     case "answer": sip.answer(); break
@@ -176,29 +343,97 @@ Panel {
     case "setup":  setupOpen = true; break
     case "voicemail": sip.dial(sip.voicemailTarget); break
     case "dnd":    sip.toggleDnd(); break
+    case "contacts": view = "contacts"; break
+    case "all-calls": view = "history"; break
+    case "contact-new": openContact(""); break
+    case "clear-history":
+      if (armed === "clear") { disarm(); sip.clearHistory() }
+      else arm("clear")
+      break
     default:
       if (id.indexOf("redial:") === 0 && id.length > 7) sip.dial(id.substring(7))
       else if (id.indexOf("call:") === 0 && id.length > 5) { dialText = ""; sip.dial(id.substring(5)) }
+      else if (id.indexOf("contact:") === 0 && id.length > 8) { view = "main"; sip.dial(id.substring(8)) }
     }
   }
 
-  // "Save as contact" for a row's address; an existing contact is renamed,
-  // and saving an empty name removes it.
+  // x or Delete on a saved contact: the first press asks, the second (within a
+  // few seconds, with the cursor where it was) deletes.
+  function requestDelete() {
+    var a = cursorAction()
+    if (!contactsShown || !a || !a.saved) return
+    if (armed === "delete:" + a.contactUri) { disarm(); sip.deleteContact(a.contactUri) }
+    else arm("delete:" + a.contactUri)
+  }
+
+  // Keys on the contacts screen: a search is what is typed there, except e and
+  // c on a contact, which edit it.
+  function contactsKey(t, key) {
+    var a = cursorAction()
+    if ((key === "e" || key === "c") && a && a.saved) { openContact(a.contactUri); return }
+    if (t.length === 1 && t >= " " && t !== "\x7f") {
+      contactQuery = contactQuery + t
+      cursorActive = false
+      contactsSearch.forceActiveFocus()
+    }
+  }
+
+  // The contact saved under exactly this address, or null. Exactly: a name
+  // lent to a caller by extension (Model.contactName) is not a contact to edit.
+  function savedContact(uri) {
+    var target = Model.redialTarget({ peer: uri })
+    for (var i = 0; i < sip.contacts.length; i++) if (sip.contacts[i].uri === target) return sip.contacts[i]
+    return null
+  }
+
+  // The contact form, for a row's address ("" for a new contact). A saved
+  // contact is edited -- name and address, replaced in one step -- and an empty
+  // name removes it.
   function openContact(uri) {
-    if (!uri) return
-    contactUri = uri
-    contactField.text = sip.nameFor(uri)
-    Qt.callLater(function() { contactField.forceActiveFocus(); contactField.selectAll() })
+    var saved = uri ? savedContact(uri) : null
+    contactOriginal = saved ? saved.uri : ""
+    contactError = ""
+    contactNameField.text = saved ? saved.name : ""
+    contactNumberField.text = uri || ""
+    contactBaseName = contactNameField.text
+    contactBaseNumber = contactNumberField.text
+    contactOpen = true
+    Qt.callLater(function() { contactNameField.forceActiveFocus(); contactNameField.selectAll() })
+  }
+
+  function contactDirty() {
+    return contactNameField.text !== contactBaseName || contactNumberField.text !== contactBaseNumber
   }
 
   function saveContact() {
-    if (contactUri === "") return
-    if (sip.saveContact(contactUri, contactField.text)) contactUri = ""
+    if (!contactOpen) return
+    var r = Model.contactForm(contactNameField.text, contactNumberField.text, sip.aor,
+                              contactOriginal, sip.contacts)
+    if (r.error !== "") { contactError = r.error; return }
+    if (sip.saveContact(r.uri, r.name, contactOriginal)) contactOpen = false
+    else contactError = "Still saving the last change — try again"
+  }
+
+  // The form's Delete asks first, like the row's x: a second press within a few
+  // seconds deletes.
+  function deleteOpenContact() {
+    if (contactOriginal === "") return
+    if (armed !== "form-delete") { arm("form-delete"); return }
+    disarm()
+    if (sip.deleteContact(contactOriginal)) contactOpen = false
   }
 
   function cursorAction() {
     if (!cursorActive || actions.length === 0) return null
     return actions[Math.min(cursorIndex, actions.length - 1)]
+  }
+
+  // Down from a field: onto the rows under it.
+  function intoRows() {
+    if (actions.length === 0) return
+    cursorIndex = 0
+    cursorActive = true
+    keyCatcher.forceActiveFocus()
   }
 
   function moveCursor(dy) {
@@ -243,12 +478,23 @@ Panel {
     authField.text = String(d.authUser || "")
     displayField.text = String(d.displayName || "")
     transportField.value = ["udp", "tcp", "tls"].indexOf(d.transport) >= 0 ? d.transport : "udp"
+    outboundStored = String(d.outbound || "")
+    stunStored = String(d.stun || "")
+    outboundField.text = outboundStored
+    stunField.text = stunStored
+    codecsOn = Model.codecIds(d)
+    codecsStored = Model.codecArg(codecsOn)
+    codecsCustom = d.codecsCustom === true
     passwordField.text = ""
   }
 
   onSetupOpenChanged: {
     if (setupOpen) {
+      view = "main"
       setupTouched = false
+      outboundEdited = false
+      stunEdited = false
+      codecsEdited = false
       fillSetupForm()
       sip.loadAccount()
     } else {
@@ -266,8 +512,20 @@ Panel {
         root.keypadOpen = false
         root.transferOpen = false
       }
-      if (sip.callState !== "idle") root.contactUri = ""
+      if (sip.callState !== "idle") {
+        root.contactOpen = false
+        root.setupOpen = false
+        root.view = "main"
+      }
     }
+    function onDaemonUpChanged() { if (!sip.daemonUp) root.view = "main" }
+  }
+
+  // The panel scrolls to whatever form control has the keyboard.
+  Connections {
+    target: setupForm.Window.window
+    ignoreUnknownSignals: true
+    function onActiveFocusItemChanged() { root.revealFocus() }
   }
 
   function doTransfer() {
@@ -290,6 +548,10 @@ Panel {
   implicitHeight: button.implicitHeight
 
   onOpenedChanged: if (opened) {
+    // Always the main screen, and never a form left over from last time.
+    view = "main"
+    contactOpen = false
+    disarm()
     cursorActive = false
     cursorIndex = 0
     if (panelFlick) panelFlick.contentY = 0
@@ -336,7 +598,16 @@ Panel {
       var now = Date.now()
       if (now - root.lastPrefillAt < root.prefillIntervalMs) return
       if (dialField.activeFocus && root.dialText.trim() !== "") return
+      // Never over a number the person typed, in a field that is not even on
+      // screen now (only what a link put there last may be replaced) ...
+      if (root.dialText.trim() !== "" && root.dialText !== root.lastPrefill) return
+      // ... nor over a contact form they have been editing. An untouched one
+      // is closed, and a screen is left, so the filled field is what they see.
+      if (root.contactOpen && root.contactDirty()) return
+      root.contactOpen = false
+      root.view = "main"
       root.lastPrefillAt = now
+      root.lastPrefill = target
       root.dialText = target
       root.cursorActive = false
       root.typingGuardUntil = now + root.typingQuietMs
@@ -487,10 +758,11 @@ Panel {
       onMoveRequested: function(dx, dy) {
         if (root.guardKey()) return
         if (!root.cursorActive) { root.cursorActive = true; return }
-        // Up from the first row goes back to the dial field it came from.
-        if (dy < 0 && root.cursorIndex === 0 && dialRow.visible) {
+        // Up from the first row goes back to the dial or search field it came from.
+        if (dy < 0 && root.cursorIndex === 0 && (dialRow.visible || root.contactsShown)) {
           root.cursorActive = false
-          dialField.forceActiveFocus()
+          if (dialRow.visible) dialField.forceActiveFocus()
+          else contactsSearch.forceActiveFocus()
           return
         }
         if (dy !== 0) root.moveCursor(dy)
@@ -501,11 +773,22 @@ Panel {
           root.activate(root.actions[Math.min(root.cursorIndex, root.actions.length - 1)].id)
         }
       }
-      onCloseRequested: root.close()
+      // Escape goes back a step: out of a form, then out of a screen, and only
+      // from the main one does it close the panel.
+      onCloseRequested: {
+        if (root.contactOpen) root.contactOpen = false
+        else if (root.view !== "main") root.view = "main"
+        else root.close()
+      }
+      onDeleteRequested: {
+        if (root.guardKey()) return
+        root.requestDelete()
+      }
       onTabRequested: function(direction) { root.switchPanel(direction) }
       onTextKey: function(t) {
         if (root.guardKey()) return
         var key = String(t || "").toLowerCase()
+        if (root.contactsShown) { root.contactsKey(String(t || ""), key); return }
         if (key === "a" && sip.callState === "incoming") sip.answer()
         else if ((key === "d" || key === "r") && sip.callState === "incoming") sip.hangup()
         // h j k l and x never arrive here: PanelKeyCatcher takes them for
@@ -516,9 +799,12 @@ Panel {
         else if (key === "n" && sip.callState === "active") root.keypadOpen = !root.keypadOpen
         else if (key === "t" && sip.callState === "active") root.transferOpen = true
         else if (sip.callState === "active" && Model.isKeypadKey(t)) sip.sendDigits(t)
-        else if (key === "s") root.setupOpen = !root.setupOpen
+        else if (key === "s" && sip.callState === "idle") root.setupOpen = !root.setupOpen
         else if (key === "q" && !sip.onCall && sip.callState !== "incoming") sip.toggleDnd()
         else if (key === "v" && sip.callState === "idle" && sip.voicemailTarget !== "") sip.dial(sip.voicemailTarget)
+        else if (key === "o" && root.mainIdle) root.view = "contacts"
+        else if (key === "y" && root.mainIdle && root.moreCalls) root.view = "history"
+        else if (key === "n" && root.mainIdle) root.dialPadOpen = !root.dialPadOpen
         else if (key === "c" && root.cursorAction() && root.cursorAction().contactUri)
           root.openContact(root.cursorAction().contactUri)
         // Anything dialable typed while the cursor is on the rows goes back
@@ -580,6 +866,92 @@ Panel {
             wrapMode: Text.WordWrap
           }
 
+          // ---------- contact form ----------
+          // Modal, like the account form: while it is open there are no rows and
+          // no dial field. It sits here, under the error line, so it is on
+          // screen whichever row it was opened from.
+          Column {
+            id: contactForm
+            visible: root.contactOpen && sip.callState === "idle"
+            width: parent.width
+            spacing: Style.space(6)
+            Keys.onEscapePressed: root.contactOpen = false
+
+            PanelSectionHeader {
+              text: root.contactOriginal !== "" ? "EDIT CONTACT" : "NEW CONTACT"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            TextField {
+              id: contactNameField
+              width: parent.width
+              placeholderText: "Name"
+              foreground: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              maximumLength: 128
+              onTextEdited: root.contactError = ""
+              onAccepted: if (!root.guardKey()) root.saveContact()
+              Keys.onPressed: function(event) {
+                if (Date.now() < root.typingGuardUntil) { root.guardKey(); event.accepted = true }
+              }
+              Keys.onEscapePressed: root.contactOpen = false
+            }
+
+            TextField {
+              id: contactNumberField
+              width: parent.width
+              placeholderText: "Extension, number or sip:user@host"
+              foreground: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              maximumLength: 256
+              onTextEdited: root.contactError = ""
+              onAccepted: if (!root.guardKey()) root.saveContact()
+              Keys.onPressed: function(event) {
+                if (Date.now() < root.typingGuardUntil) { root.guardKey(); event.accepted = true }
+              }
+              Keys.onEscapePressed: root.contactOpen = false
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              visible: root.contactError !== ""
+              width: parent.width
+              text: root.contactError
+              color: root.urgent
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.bodySmall
+              wrapMode: Text.WordWrap
+            }
+
+            RowLayout {
+              width: parent.width
+              spacing: Style.space(6)
+
+              Button {
+                text: "Save"
+                focusable: true
+                onClicked: if (!root.guardKey()) root.saveContact()
+              }
+
+              Button {
+                text: "Cancel"
+                focusable: true
+                onClicked: root.contactOpen = false
+              }
+
+              Button {
+                text: root.armed === "form-delete" ? "Press again to delete" : "Delete"
+                foreground: root.armed === "form-delete" ? root.urgent : root.foreground
+                focusable: true
+                visible: root.contactOriginal !== ""
+                onClicked: if (!root.guardKey()) root.deleteOpenContact()
+              }
+            }
+          }
+
           // ---------- live call ----------
           Column {
             id: callBlock
@@ -626,6 +998,7 @@ Panel {
               width: parent.width
               visible: sip.callState === "active"
               text: Model.durationText(sip.callStartedAt, clock.now)
+                    + (sip.codec !== "" ? " · " + sip.codec : "")
               color: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.body
@@ -681,6 +1054,7 @@ Panel {
             id: dialRow
             visible: sip.daemonUp && sip.configured && !sip.onCall
                      && sip.callState !== "incoming" && !setupForm.visible
+                     && !contactForm.visible && root.view === "main"
             width: parent.width
             spacing: Style.space(6)
 
@@ -713,6 +1087,21 @@ Panel {
             }
 
             PanelActionButton {
+              // nf-md-dialpad (U+F061C), as in the call's own keypad row.
+              iconText: "\udb81\ude1c"
+              tooltipText: root.dialPadOpen ? "Hide keypad" : "Keypad"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              bordered: root.dialPadOpen
+              Layout.alignment: Qt.AlignVCenter
+              onClicked: {
+                if (root.guardKey()) return
+                root.dialPadOpen = !root.dialPadOpen
+                dialField.forceActiveFocus()
+              }
+            }
+
+            PanelActionButton {
               iconText: "\uf095"
               tooltipText: "Call"
               foreground: root.foreground
@@ -720,6 +1109,52 @@ Panel {
               enabled: root.dialText.trim() !== "" && !sip.busy
               Layout.alignment: Qt.AlignVCenter
               onClicked: root.placeCall()
+            }
+          }
+
+          // ---------- dial keypad ----------
+          // Each button adds its digit to what is typed and leaves the keyboard
+          // in the dial field. It dials nothing: Enter or the Call button does.
+          DigitPad {
+            id: dialPad
+            verb: "Type "
+            visible: root.dialPadOpen && dialRow.visible
+            anchors.horizontalCenter: parent.horizontalCenter
+            onPressed: function(digit) {
+              if (root.guardKey()) return
+              root.dialText = root.dialText + digit
+              dialField.forceActiveFocus()
+            }
+          }
+
+          // ---------- contacts search ----------
+          RowLayout {
+            id: contactsSearchRow
+            visible: root.contactsShown
+            width: parent.width
+            spacing: Style.space(6)
+
+            TextField {
+              id: contactsSearch
+              Layout.fillWidth: true
+              placeholderText: "Search contacts"
+              foreground: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              maximumLength: 128
+              text: root.contactQuery
+
+              onTextChanged: if (text !== root.contactQuery) root.contactQuery = text
+              // Guarded like the dial field: the catcher stands aside while a
+              // field has focus, so nothing typed under a self-opened panel
+              // may land here, Enter least of all.
+              onAccepted: if (!root.guardKey()) root.intoRows()
+              Keys.onPressed: function(event) {
+                if (Date.now() < root.typingGuardUntil) { root.guardKey(); event.accepted = true }
+              }
+              Keys.onDownPressed: root.intoRows()
+              Keys.onEscapePressed: root.view = "main"
+              onVisibleChanged: if (visible) Qt.callLater(forceActiveFocus)
             }
           }
 
@@ -760,33 +1195,18 @@ Panel {
           // ---------- keypad ----------
           // Below the in-call rows, not above them: opened above, it pushed
           // Hang up out of view.
-          Grid {
+          DigitPad {
             id: keypad
             visible: root.keypadOpen && sip.callState === "active"
-            columns: 3
-            spacing: Style.space(6)
             anchors.horizontalCenter: parent.horizontalCenter
-
-            Repeater {
-              model: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"]
-              PanelActionButton {
-                required property string modelData
-                iconText: modelData
-                tooltipText: "Send " + modelData
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                fontSize: Style.font.heading
-                size: Style.space(40)
-                bordered: true
-                onClicked: sip.sendDigits(modelData)
-              }
-            }
+            onPressed: function(digit) { sip.sendDigits(digit) }
           }
 
           // ---------- call log ----------
           PanelSectionHeader {
             visible: root.historyActions.length > 0
-            text: "RECENT CALLS"
+            text: root.view === "contacts" ? "CONTACTS"
+                  : (root.view === "history" ? "CALL HISTORY" : "RECENT CALLS")
             foreground: root.foreground
             fontFamily: root.fontFamily
           }
@@ -807,49 +1227,33 @@ Panel {
             }
           }
 
-          // ---------- save as contact ----------
+          // After the list: the row that opens the whole call log, or the one
+          // that clears it.
           Column {
-            id: contactRow
-            visible: root.contactUri !== "" && sip.callState === "idle"
+            id: moreColumn
+            visible: root.moreActions.length > 0
             width: parent.width
             spacing: Style.space(6)
 
-            Text {
-              textFormat: Text.PlainText
-              width: parent.width
-              text: "Save " + Model.peerLabel(root.contactUri) + " as"
-                    + (sip.nameFor(root.contactUri) !== "" ? " (empty removes it)" : "")
-              color: root.dim
-              font.family: root.fontFamily
-              font.pixelSize: Style.font.caption
-              elide: Text.ElideMiddle
-            }
-
-            RowLayout {
-              width: parent.width
-              spacing: Style.space(6)
-
-              TextField {
-                id: contactField
-                Layout.fillWidth: true
-                placeholderText: "Name"
-                foreground: root.foreground
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.body
-                maximumLength: 128
-                onAccepted: root.saveContact()
-                Keys.onEscapePressed: root.contactUri = ""
-              }
-
-              PanelActionButton {
-                iconText: "\uf234"
-                tooltipText: "Save contact"
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                Layout.alignment: Qt.AlignVCenter
-                onClicked: root.saveContact()
+            Repeater {
+              model: root.moreActions
+              ActionRow {
+                required property var modelData
+                width: moreColumn.width
+                action: modelData
               }
             }
+          }
+
+          Text {
+            textFormat: Text.PlainText
+            visible: root.emptyText !== ""
+            width: parent.width
+            text: root.emptyText
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.bodySmall
+            wrapMode: Text.WordWrap
           }
 
           // ---------- account setup ----------
@@ -860,9 +1264,12 @@ Panel {
 
           Column {
             id: setupForm
-            visible: !sip.configured || root.setupOpen
+            visible: (!sip.configured || root.setupOpen) && sip.callState === "idle"
             width: parent.width
             spacing: Style.space(8)
+            // Whatever has the keyboard in the form -- a switch, a button, the
+            // dropdown -- passes Escape up to here.
+            Keys.onEscapePressed: root.setupOpen = false
 
             PanelSectionHeader {
               text: sip.configured ? "CHANGE ACCOUNT" : "SET UP ACCOUNT"
@@ -923,7 +1330,7 @@ Panel {
               foreground: root.foreground
               font.family: root.fontFamily
               font.pixelSize: Style.font.body
-              onAccepted: root.saveAccount()
+              onAccepted: if (!root.guardKey()) root.saveAccount()
               Keys.onEscapePressed: root.setupOpen = false
             }
 
@@ -935,7 +1342,96 @@ Panel {
               options: ["udp", "tcp", "tls"]
               foreground: root.foreground
               fontFamily: root.fontFamily
-              onChanged: function(v) { transportField.value = v; root.setupTouched = true }
+              onChanged: function(v) {
+                if (root.guardKey()) return
+                transportField.value = v
+                root.setupTouched = true
+              }
+            }
+
+            TextField {
+              id: outboundField
+              width: parent.width
+              placeholderText: "Outbound proxy (optional)"
+              foreground: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              maximumLength: 256
+              onTextEdited: { root.setupTouched = true; root.outboundEdited = true }
+              onAccepted: if (!root.guardKey()) root.saveAccount()
+              Keys.onPressed: function(event) {
+                if (Date.now() < root.typingGuardUntil) { root.guardKey(); event.accepted = true }
+              }
+              Keys.onEscapePressed: root.setupOpen = false
+            }
+
+            TextField {
+              id: stunField
+              width: parent.width
+              placeholderText: "STUN server (optional)"
+              foreground: root.foreground
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.body
+              maximumLength: 256
+              onTextEdited: { root.setupTouched = true; root.stunEdited = true }
+              onAccepted: if (!root.guardKey()) root.saveAccount()
+              Keys.onPressed: function(event) {
+                if (Date.now() < root.typingGuardUntil) { root.guardKey(); event.accepted = true }
+              }
+              Keys.onEscapePressed: root.setupOpen = false
+            }
+
+            Text {
+              textFormat: Text.PlainText
+              width: parent.width
+              text: "A proxy looks like sip:proxy.example.com, a STUN server like stun.example.com:3478."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            PanelSectionHeader {
+              text: "AUDIO CODECS"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            // A list somebody wrote by hand has things these switches cannot
+            // show, so it is left alone -- and not sent back on save.
+            Text {
+              textFormat: Text.PlainText
+              visible: root.codecsCustom
+              width: parent.width
+              text: "Custom codec list — edit ~/.config/omarchy-sip/accounts by hand"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            Column {
+              visible: !root.codecsCustom
+              width: parent.width
+              spacing: Style.space(6)
+
+              Repeater {
+                model: Model.CODEC_CHOICES
+                Toggle {
+                  required property var modelData
+                  width: parent.width
+                  label: modelData.label
+                  checked: root.codecsOn.indexOf(modelData.id) >= 0
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  onClicked: {
+                    if (root.guardKey()) return
+                    root.codecsOn = Model.toggleCodec(root.codecsOn, modelData.id)
+                    root.setupTouched = true
+                    root.codecsEdited = true
+                  }
+                }
+              }
             }
 
             RowLayout {
@@ -944,14 +1440,16 @@ Panel {
 
               Button {
                 text: "Save"
+                focusable: true
                 enabled: uriField.text.trim() !== ""
-                onClicked: root.saveAccount()
+                onClicked: if (!root.guardKey()) root.saveAccount()
               }
 
               Button {
                 text: "Cancel"
+                focusable: true
                 visible: sip.configured
-                onClicked: root.setupOpen = false
+                onClicked: if (!root.guardKey()) root.setupOpen = false
               }
             }
           }
@@ -961,12 +1459,23 @@ Panel {
   }
 
   function saveAccount() {
+    // A save restarts the daemon, which would drop the call.
+    if (sip.callState !== "idle") return
     var uri = Model.accountUri(uriField.text, authField.text)
     if (uri === "") return
+    // Only what the person changed is sent beyond the basics: a proxy, STUN
+    // server or codec list that was already there -- written by hand, say, in a
+    // form this one cannot show, or not yet loaded into it when they typed --
+    // is never sent back as blank. A field counts as changed when it was edited
+    // and now differs from what it was filled from.
+    var extra = {}
+    if (outboundEdited && outboundField.text.trim() !== outboundStored) extra.outbound = outboundField.text.trim()
+    if (stunEdited && stunField.text.trim() !== stunStored) extra.stun = stunField.text.trim()
+    if (codecsEdited && !codecsCustom && Model.codecArg(codecsOn) !== codecsStored) extra.codecs = Model.codecArg(codecsOn)
     // A save already in flight refuses this one; keep the form (and the typed
     // password) on screen rather than silently dropping it.
     if (!sip.setAccount(uri, authField.text.trim(), displayField.text.trim(),
-                        transportField.value, passwordField.text))
+                        transportField.value, passwordField.text, extra))
       return
     // Never keep the password in a live QML property.
     passwordField.text = ""
@@ -982,6 +1491,30 @@ Panel {
     repeat: true
     onTriggered: now = Date.now()
     onRunningChanged: if (running) now = Date.now()
+  }
+
+  // The 3x4 telephone keypad, for the call's tones and for the dial field.
+  component DigitPad: Grid {
+    id: pad
+    property string verb: "Send "
+    signal pressed(string digit)
+    columns: 3
+    spacing: Style.space(6)
+
+    Repeater {
+      model: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "*", "0", "#"]
+      PanelActionButton {
+        required property string modelData
+        iconText: modelData
+        tooltipText: pad.verb + modelData
+        foreground: root.foreground
+        fontFamily: root.fontFamily
+        fontSize: Style.font.heading
+        size: Style.space(40)
+        bordered: true
+        onClicked: pad.pressed(modelData)
+      }
+    }
   }
 
   component ActionRow: CursorSurface {
@@ -1006,7 +1539,12 @@ Panel {
       hoverEnabled: true
       cursorShape: Qt.PointingHandCursor
       acceptedButtons: Qt.LeftButton | Qt.RightButton
-      onEntered: {
+      // Only a pointer that is really moving selects a row. Rows are rebuilt
+      // under a resting pointer -- arming a delete does it -- and the enter
+      // that follows is not the person pointing, so it must not move the
+      // cursor (which would take the confirmation back).
+      onPositionChanged: function(mouse) {
+        if (!root.pointerGate.moved(actionRow, mouse)) return
         root.cursorActive = true
         root.cursorIndex = actionRow.rowIndex
       }

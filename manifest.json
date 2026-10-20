@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.17xande.simple-sip",
   "name": "Simple SIP",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "Alexandre Figueiredo",
   "license": "MIT",
   "description": "A simple SIP softphone in the Omarchy bar: register one account, place calls, and answer incoming ones. Powered by baresip.",

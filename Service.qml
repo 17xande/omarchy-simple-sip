@@ -98,6 +98,10 @@ Item {
   property bool onHold: false
   // DTMF sent during this call, for the panel to echo back (last 24 only).
   property string sentDigits: ""
+  // What the answered call negotiated, "opus 48 kHz", once baresip has said so
+  // (see fetchCodec); "" before that, and again when the call ends.
+  property string codec: ""
+  property int codecTries: 0
   // The last optimistic mute/hold change, so a refusal can put it back.
   property var pendingToggle: null
   // Which of the two sources spoke last. A status snapshot is a request/reply
@@ -109,7 +113,9 @@ Item {
   // When the panel last sent a dial. A refusal that arrives with no call event
   // after this is the refusal of that dial, so the optimistic "Calling…" goes.
   property double dialSentAt: 0
-  // Recent calls, newest first, as recorded by the daemon.
+  // The call log, newest first, as recorded by the daemon -- all of it, the
+  // most it keeps (HISTORY_LIMIT in the CLI), so the history screen can list it
+  // all. The panel's own Recent calls section shows only the first historyLimit.
   property var history: []
   // Missed calls logged since the panel was last opened, over the whole log.
   property int unseenMissed: 0
@@ -119,6 +125,9 @@ Item {
   // The last voicemail summary the server sent (see Model.parseMwi).
   property var mwi: ({ waiting: false, newCount: 0, oldCount: 0, account: "" })
   property bool markSeenPending: false
+  // A clear asked for while a refresh was still running: the refresh's exit
+  // picks it up, the way markSeenPending is.
+  property bool clearPending: false
   // The stored account as `account show` reports it -- everything the setup
   // form edits except the password, of which only hasPassword is known.
   property var accountDetails: ({})
@@ -171,6 +180,7 @@ Item {
 
   readonly property int statusRefreshSec: intSetting("statusRefreshSec", 60, 10, 600)
   readonly property int historyLimit: intSetting("historyLimit", 5, 0, 20)
+  readonly property int keptHistory: 50   // HISTORY_LIMIT in the CLI
 
   // Backoff for respawning the `events` subprocess while the daemon is
   // unreachable -- each retry is a Python interpreter start, not a syscall.
@@ -218,15 +228,29 @@ Item {
   }
 
   // Runs even with historyLimit 0: the list may be hidden, but the missed-call
-  // count still drives the bar badge.
-  function refreshHistory() {
-    if (historyProcess.running) return
-    var args = [cli, "history", "--limit", String(historyLimit)]
+  // count still drives the bar badge. Always asks for the whole log: the
+  // history screen shows all of it, the panel's list the first few.
+  function refreshHistory(clear) {
+    if (historyProcess.running) return false
+    var args = [cli, "history", "--limit=" + keptHistory]
+    if (clear === true) args.push("--clear")
     if (markSeenPending) args.push("--mark-seen")
     markSeenPending = false
+    historyProcess.clearing = clear === true
     historyProcess.command = args
     historyProcess.running = true
     historyWatchdog.restart()
+    return true
+  }
+
+  // Empties the call log. The CLI answers with the (now empty) log, which is
+  // read exactly like any refresh, so the panel never shows calls that are gone.
+  // Refused while a call is up -- the panel does not offer it then either, and
+  // a call that ends a moment later would be logged into the middle of it.
+  function clearHistory() {
+    if (callState !== "idle") return false
+    if (historyProcess.running) { clearPending = true; return true }
+    return refreshHistory(true)
   }
 
   // Opening the panel is looking at the log.
@@ -460,6 +484,10 @@ Item {
   // idle is it ending, answered or not.
   property string previousCallState: "idle"
   onCallStateChanged: {
+    // The codec is asked for once, when the call is answered, after a moment
+    // for the audio stream to exist; it belongs to this call only.
+    if (callState === "active") { codecTries = 0; codecSettleTimer.restart() }
+    else { codecSettleTimer.stop(); codecRetryTimer.stop(); codec = "" }
     if (previousCallState === "idle" && callState !== "idle") pauseMedia()
     else if (callState === "idle") {
       resumeMedia()
@@ -497,16 +525,44 @@ Item {
 
   function startDaemon() { run(["start"]) }
 
+  // `cmd audio_debug` prints the audio stream's state, the codec in use among
+  // it. Read-only and one reply, but it is baresip's prose, so Model.parseCodec
+  // takes only the one line it understands and the reply is dropped if the call
+  // it was asked about is no longer the one on screen. Up to three tries.
+  function fetchCodec() {
+    if (callState !== "active" || codecProcess.running) return
+    codecProcess.forCall = callId
+    codecTries++
+    codecProcess.command = [cli, "cmd", "audio_debug"]
+    codecProcess.running = true
+    codecWatchdog.restart()
+  }
+
   function loadContacts() { return runContacts([cli, "contacts"]) }
 
-  // An empty name removes the contact. Both answer with the new list, so the
-  // panel never shows a contact the CLI refused to store.
-  function saveContact(uri, name) {
+  // An empty name removes the contact. Every call answers with the new list,
+  // so the panel never shows a contact the CLI refused to store. `original`,
+  // when given, is the address the contact is saved under now: the CLI then
+  // replaces that one line in a single rewrite -- a changed address is never a
+  // remove and an add, which could lose the contact between the two.
+  // Name and addresses are `--opt=value` or after `--`: a value that starts
+  // with "-" is a value, never an option.
+  function saveContact(uri, name, original) {
     var target = Model.redialTarget({ peer: uri })
     if (target === "") return false
     var n = String(name || "").trim()
-    return runContacts(n === "" ? [cli, "contacts", "remove", target]
-                                : [cli, "contacts", "add", target, "--name=" + n])
+    if (n === "") return deleteContact(target)
+    var args = [cli, "contacts", "add", "--name=" + n]
+    var old = original ? Model.redialTarget({ peer: original }) : ""
+    if (old !== "") args.push("--replace=" + old)
+    args.push("--", target)
+    return runContacts(args)
+  }
+
+  function deleteContact(uri) {
+    var target = Model.redialTarget({ peer: uri })
+    if (target === "") return false
+    return runContacts([cli, "contacts", "remove", "--", target])
   }
 
   function runContacts(args) {
@@ -534,15 +590,23 @@ Item {
   // means "unchanged", and the CLI keeps it (and outbound/regint, which the
   // form does not edit) rather than saving an account with no password.
   // Auth user and display name are always passed, so clearing either field
-  // does clear it.
-  function setAccount(uri, authUser, displayName, transport, password) {
-    if (accountProcess.running) return false
+  // does clear it. `extra` carries what the form changed beyond that --
+  // outbound, stun, codecs -- and anything it leaves out is not passed, so the
+  // CLI keeps what is stored: a hand-made codec list or a proxy the form
+  // could not have written is never overwritten by a save that did not touch it.
+  function setAccount(uri, authUser, displayName, transport, password, extra) {
+    // A save restarts the daemon, which would drop the call.
+    if (accountProcess.running || callState !== "idle") return false
     // `--opt=value` forms: a value that starts with "-" is then still a value,
     // not an option argparse refuses (after the form has already closed).
     var args = [cli, "account", "set", "--merge",
                 "--auth-user=" + String(authUser || ""),
                 "--display-name=" + String(displayName || "")]
     if (transport) args.push("--transport=" + transport)
+    var more = extra || {}
+    if (typeof more.outbound === "string") args.push("--outbound=" + more.outbound)
+    if (typeof more.stun === "string") args.push("--stun=" + more.stun)
+    if (typeof more.codecs === "string") args.push("--codecs=" + more.codecs)
     args.push("--", uri)
     lastError = ""
     accountProcess.errText = ""
@@ -794,6 +858,7 @@ Item {
   // how long this can run at all.
   Process {
     id: historyProcess
+    property bool clearing: false
     running: false
     command: []
     clearEnvironment: true
@@ -801,7 +866,14 @@ Item {
     stdout: StdioCollector { id: historyOut; waitForEnd: true }
     onExited: function(exitCode) {
       historyWatchdog.stop()
-      if (exitCode !== 0) return
+      if (root.clearPending) {
+        root.clearPending = false
+        Qt.callLater(function() { root.clearHistory() })
+      }
+      if (exitCode !== 0) {
+        if (historyProcess.clearing) root.lastError = "Could not clear the call history"
+        return
+      }
       var raw = String(historyOut.text || "[]")
       if (raw.length > root.maxJsonChars) return
       try {
@@ -813,6 +885,52 @@ Item {
       }
       if (root.markSeenPending) Qt.callLater(root.refreshHistory)
     }
+  }
+
+  // One reply, of which only a single short line is kept (see fetchCodec); the
+  // CLI drops any record over 64 KiB before it reaches this collector.
+  Process {
+    id: codecProcess
+    property string forCall: ""
+    running: false
+    command: []
+    clearEnvironment: true
+    environment: root.cleanEnv()
+    stdout: StdioCollector { id: codecOut; waitForEnd: true }
+    onExited: function(exitCode) {
+      codecWatchdog.stop()
+      if (root.callState !== "active" || root.callId !== codecProcess.forCall) return
+      var found = ""
+      var raw = String(codecOut.text || "")
+      if (exitCode === 0 && raw.length <= root.maxJsonChars) {
+        try {
+          var reply = JSON.parse(raw)
+          found = Model.parseCodec(reply && typeof reply.data === "string" ? reply.data : "")
+        } catch (e) {}
+      }
+      // The stream may not be up the first time baresip is asked: a few more
+      // tries, a second apart, while this is still the call on screen.
+      if (found !== "") root.codec = found
+      else if (root.codecTries < 3) codecRetryTimer.restart()
+    }
+  }
+
+  Timer {
+    id: codecSettleTimer
+    interval: 600
+    onTriggered: root.fetchCodec()
+  }
+
+  Timer {
+    id: codecRetryTimer
+    interval: 1000
+    onTriggered: root.fetchCodec()
+  }
+
+  Timer {
+    id: codecWatchdog
+    interval: 10000
+    onTriggered: if (codecProcess.running) codecProcess.running = false
   }
 
   // A refusal arrives within a round trip; after this, the change stuck.

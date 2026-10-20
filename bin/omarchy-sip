@@ -243,9 +243,13 @@ module\t\t\tuuid.so
 # "Network is unreachable [101]" until the daemon is restarted by hand.
 module\t\t\tnetroam.so
 
-# codecs -- g711 is the universal floor, opus for anything that offers it
+# codecs -- g711 is the universal floor, opus for anything that offers it, and
+# g722 for the wideband calls a PBX that has no opus will still do. Loading a
+# module only makes the codec available: which ones an account actually offers
+# is its own audio_codecs list (see `account set --codecs`).
 module\t\t\topus.so
 module\t\t\tg711.so
+module\t\t\tg722.so
 
 # audio device
 module\t\t\tpulse.so
@@ -2077,6 +2081,9 @@ _COMMAND_GRAMMAR: dict[str, "re.Pattern[str] | None"] = {
     "hangup": _CALL_ID_OPT,
     "reginfo": None,
     "listcalls": None,
+    # What the established call negotiated; the panel shows the codec. Takes
+    # no parameter and changes nothing -- it only prints the audio stream.
+    "audio_debug": None,
     # In-call controls from baresip's menu module, all on the current call.
     # mute takes an explicit state rather than toggling, so a command that
     # arrives twice cannot flip it back.
@@ -2444,6 +2451,17 @@ def cmd_contacts(args) -> int:
     name = contact_name_field(args.name or "") if args.action == "add" else ""
     if args.action == "add" and not name:
         die("contacts add needs --name")
+    # --replace=OLD turns the contact saved as OLD into this one in the same
+    # rewrite, so the panel's edit form (new name, new address) is one command
+    # rather than a remove and an add with a window between them in which the
+    # contact exists under neither.
+    replace = None
+    if args.replace is not None:
+        if args.action != "add":
+            die("--replace goes with contacts add")
+        replace = sip_address(args.replace)
+        if not replace:
+            die("--replace needs the sip: address of the contact being replaced")
     # Edit lines, never re-serialise the file: it is baresip's own, and
     # carries things this command does not model -- comments, tel: entries,
     # presence and, above all, `;access=block`, which is how baresip refuses
@@ -2452,24 +2470,47 @@ def cmd_contacts(args) -> int:
     lines = text.split("\n")
     if lines and lines[-1] == "":
         lines.pop()
-    out, found = [], False
+    out, found, taken, blocked_here = [], False, False, False
+    target = replace or uri
     for line in lines:
         stripped = line.strip()
         address = contact_address(stripped)
         blocked = bool(re.search(r";\s*access\s*=\s*block\b", address.split(">", 1)[-1], re.I))
         # A block line is baresip's call blocking, not the contact: removing
         # or renaming a contact must never unblock a caller.
-        if not stripped or stripped.startswith("#") or blocked or sip_address(address) != uri:
+        if not stripped or stripped.startswith("#") or blocked:
+            # baresip takes the first line for an address, so a contact written
+            # for a blocked one could unblock the caller; remember it is there.
+            blocked_here = blocked_here or (bool(stripped) and not stripped.startswith("#")
+                                            and sip_address(address) == uri)
             out.append(line)
             continue
-        if found and args.action == "remove":
+        here = sip_address(address)
+        taken = taken or here == uri
+        if here != target:
+            out.append(line)
+            continue
+        if found and (args.action == "remove" or replace):
             out.append(line)         # only the first matching contact line
             continue
         found = True
         if args.action == "add":
             tail = address.split(">", 1)[1] if ">" in address else ""
             out.append(contact_line({"name": name, "uri": uri}) + tail)
-    if args.action == "add" and not found:
+    # Never a contact for an address that is blocked -- moved onto, or added
+    # fresh. (Renaming a contact that already shares its address with a block
+    # line changes nothing about who wins, so that stays allowed.)
+    if blocked_here and ((replace and uri != replace) or (not replace and args.action == "add" and not found)):
+        die(f"{uri} is blocked -- unblock it by hand in contacts first")
+    if replace:
+        if not found:
+            die(f"no contact for {replace}")
+        # Moving a contact onto an address that is already someone else's would
+        # leave two lines for one address, and the panel could then only ever
+        # reach the first of them.
+        if uri != replace and taken:
+            die(f"{uri} is already a contact")
+    elif args.action == "add" and not found:
         if len(contacts) >= MAX_CONTACTS:
             die(f"at most {MAX_CONTACTS} contacts")
         out.append(contact_line({"name": name, "uri": uri}))
@@ -2687,6 +2728,17 @@ def cmd_handler(args) -> int:
 
 
 def cmd_history(args) -> int:
+    if args.clear:
+        # Replaced with an empty file through the pinned directory, never
+        # truncated in place (a planted hard link would otherwise be emptied
+        # too). A call in progress is no reason to refuse: the daemon's tracker
+        # only touches this file when a call *closes*, and does so by reading
+        # it back and replacing it whole, so a call still up is simply logged
+        # after the clear -- which is when it ended. The one race left is the
+        # tracker's read-modify-write straddling this write, which can bring
+        # back the entries read a moment earlier; the panel only offers the
+        # clear with no call up, and a second clear removes them.
+        write_private(HISTORY, "", conf_fd())
     if args.mark_seen:
         write_private(SEEN, f"{time.time():.3f}\n", conf_fd())
     seen = read_seen()
@@ -2788,6 +2840,82 @@ def account_field(name: str, value: str, limit: int = MAX_ACCOUNT_FIELD) -> str:
 # where the person saving it can be told why.
 ACCOUNT_URI = re.compile(r"^sip:[^@\s;\"<>]+@[^@\s;\"<>]+$")
 
+# An outbound proxy is a SIP URI of its own. account_field() already refuses the
+# characters that would break the line; this refuses a value baresip would
+# misread as something else (a bare host registers through the wrong server, or
+# none) before it is saved: an optional user part, then a host or a bracketed
+# IPv6 literal, then an optional port, in plain ASCII. fullmatch, since `$` also matches before a newline.
+OUTBOUND_URI = re.compile(
+    r"sips?:(?:[A-Za-z0-9._~%+-]{1,64}@)?"
+    r"(?:[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?|\[[0-9A-Fa-f:.]{2,45}\])"
+    r"(?::[0-9]{1,5})?")
+
+# The STUN server for NAT traversal: host, host:port, or either behind a
+# stun:/stuns: scheme (kept as given, stun: when none was). A hostname, or a
+# bracketed IPv6 literal -- no user:pass@ part, no query, nothing the account
+# grammar could read as a second field. A name made only of digits is not a
+# host, which is also what lets `stun:3478` read as host "stun", port 3478.
+STUN_SERVER = re.compile(
+    r"(?:(stuns?):)?"
+    r"(\[[0-9A-Fa-f:.]{2,45}\]|(?![0-9]+(?::|$))"
+    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?){0,126})"
+    r"(?::([0-9]{1,5}))?", re.IGNORECASE)
+
+
+def stun_server(value: str) -> str:
+    """`value` as the stunserver parameter's content (`stun:host:port`), or die."""
+    m = STUN_SERVER.fullmatch(value)
+    if not m or (m.group(3) is not None and not 1 <= int(m.group(3)) <= 65535):
+        die("the STUN server must be host, host:port, or either behind stun: or stuns:")
+    scheme = (m.group(1) or "stun").lower()
+    return f"{scheme}:{m.group(2)}" + (f":{int(m.group(3))}" if m.group(3) is not None else "")
+
+
+# The audio codecs the panel offers, in the order they are offered. Each id is
+# the one `--codecs` takes and `account show` reports; the spec is what goes in
+# audio_codecs (name/srate/channels, as baresip's own modules register them --
+# G.722 is clocked at 16 kHz there although RTP says 8000).
+CODEC_SPECS = {
+    "opus": "opus/48000/2",
+    "g722": "G722/16000/1",
+    "pcmu": "PCMU/8000/1",
+    "pcma": "PCMA/8000/1",
+}
+_CODEC_IDS = {spec.lower(): key for key, spec in CODEC_SPECS.items()}
+DEFAULT_CODECS = "opus/48000/2,PCMU/8000/1,PCMA/8000/1"
+
+
+def codec_list(value: str) -> str:
+    """`--codecs` as an audio_codecs value: ids from the four known ones, none
+    twice, at least one, whatever order they were given in."""
+    ids = [part.strip().lower() for part in value.split(",")]
+    if not all(ids) or any(i not in CODEC_SPECS for i in ids) or len(set(ids)) != len(ids):
+        die("--codecs takes a comma-separated list of: " + ", ".join(CODEC_SPECS)
+            + " (each at most once, at least one)")
+    return ",".join(spec for key, spec in CODEC_SPECS.items() if key in ids)
+
+
+def stored_codecs(value: str) -> tuple[list[str], bool]:
+    """The known codec ids in a stored audio_codecs, and whether it holds
+    anything else -- which means somebody wrote the list by hand and the panel
+    must not offer to overwrite it. Matched case-insensitively, as baresip does."""
+    ids: list[str] = []
+    custom = False
+    for part in value.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        # baresip reads a missing channel count as 1.
+        fields = part.lower().split("/")
+        if len(fields) == 2:
+            fields.append("1")
+        key = _CODEC_IDS.get("/".join(fields))
+        if key is None:
+            custom = True
+        elif key not in ids:
+            ids.append(key)
+    return [key for key in CODEC_SPECS if key in ids], custom
+
 
 def account_details() -> dict:
     """What `account show` reports: everything the form edits except the
@@ -2797,6 +2925,7 @@ def account_details() -> dict:
         return {"configured": False, "aor": ""}
     params = entry["params"]
     regint = params.get("regint", "")
+    codecs, custom = stored_codecs(params.get("audio_codecs", ""))
     return {
         "configured": bool(entry["uri"]),
         "aor": entry["uri"],
@@ -2804,6 +2933,10 @@ def account_details() -> dict:
         "authUser": params.get("auth_user", ""),
         "transport": account_transport(),
         "outbound": params.get("outbound", ""),
+        "stun": params.get("stunserver", ""),
+        "mediaNat": params.get("medianat", ""),
+        "codecs": codecs,
+        "codecsCustom": custom,
         "regint": int(regint) if regint.isdigit() else None,
         "hasPassword": bool(params.get("auth_pass", "")),
     }
@@ -2842,21 +2975,42 @@ def cmd_account(args) -> int:
         args.display_name if args.display_name is not None else (current["display"] if current else ""),
     )
     outbound = account_field("outbound proxy", pick(args.outbound, "outbound"))
+    # Only what was asked for is checked: an outbound proxy already stored, by
+    # hand or by an older version, is carried through as it is.
+    if args.outbound and not OUTBOUND_URI.fullmatch(args.outbound):
+        die("the outbound proxy must be a sip: or sips: address, e.g. sip:proxy.example.com")
+    stun = None
+    if args.stun is not None:
+        stun = account_field("STUN server", args.stun.strip())
+        stun = stun_server(stun) if stun else ""
+    codecs = codec_list(args.codecs) if args.codecs is not None else None
     password = account_field("password", read_password_from_stdin())
     if not password and current:
         password = account_field("password", params.get("auth_pass", ""))
     transport = args.transport or (account_transport() if current else "udp")
-    # Fields this command does not manage -- mediaenc, medianat, stunserver,
-    # sipnat, a custom audio_codecs, ... -- are carried through verbatim, so
-    # saving the form never quietly drops, say, mandatory SRTP. They come
-    # from the file as whole `key=value` segments, which the line was split
-    # on `;` to get, so they cannot contain one; a CR would end the line.
+    # Fields this command does not manage -- mediaenc, sipnat, a custom
+    # audio_codecs, ... -- are carried through verbatim, so saving the form
+    # never quietly drops, say, mandatory SRTP. They come from the file as
+    # whole `key=value` segments, which the line was split on `;` to get, so
+    # they cannot contain one; a CR would end the line.
     # Compared case-insensitively: baresip's msg_param_decode is, and first
     # match wins, so a carried-through "Outbound=" would still be used after
     # the form cleared outbound.
+    #
+    # stunserver, medianat and audio_codecs are managed when asked for
+    # (--stun, --codecs) and carried through otherwise -- but never twice: the
+    # first of each is the one baresip uses, so a later one is dropped rather
+    # than left to be mistaken for the setting, and a rewritten one is dropped
+    # wherever it was, so a `Stunserver=` cannot out-vote the one written.
     managed = {"auth_user", "auth_pass", "transport", "outbound", "answermode", "regint",
                "call_transfer"}
+    if stun is not None:
+        managed.add("stunserver")
+    if codecs is not None:
+        managed.add("audio_codecs")
     extras = []
+    seen_once: set[str] = set()
+    nat = None            # the medianat baresip would use: the first one stored
     if current and current.get("truncated"):
         # Reading keeps the first 32 fields; rewriting from that would drop
         # the rest, so refuse instead.
@@ -2868,6 +3022,14 @@ def cmd_account(args) -> int:
                 continue
             if len(field) > MAX_ACCOUNT_FIELD * 2:
                 die(f"the stored account's {key!r} field is too long to carry over")
+            if key in ("stunserver", "medianat", "audio_codecs"):
+                if key in seen_once:
+                    continue
+                seen_once.add(key)
+                if key == "medianat":
+                    nat = field.partition("=")[2].strip().strip('"').lower()
+                    if stun == "" and nat == "stun":
+                        continue        # it was only ever there for this server
             extras.append(field)
     regint = args.regint
     if regint is None:
@@ -2890,8 +3052,18 @@ def cmd_account(args) -> int:
     # a URI the other party chose. (Our own Transfer sends a REFER; it does
     # not need this.)
     entry += f";answermode=manual;regint={regint};call_transfer=no"
-    if not any(f.partition("=")[0].strip() == "audio_codecs" for f in extras):
-        entry += ";audio_codecs=opus/48000/2,PCMU/8000/1,PCMA/8000/1"
+    if codecs is not None:
+        entry += f";audio_codecs={codecs}"
+    elif not any(f.partition("=")[0].strip().lower() == "audio_codecs" for f in extras):
+        entry += f";audio_codecs={DEFAULT_CODECS}"
+    # A STUN server is useless without medianat=stun to use it. An ice or turn
+    # set by hand already does, and is the person's choice: it is kept, and
+    # clearing the server leaves it too (see above).
+    if stun:
+        entry += f';stunserver="{stun}"'
+        if nat in (None, "", "stun"):
+            extras = [f for f in extras if f.partition("=")[0].strip().lower() != "medianat"]
+            entry += ";medianat=stun"
     entry += "".join(";" + f for f in extras)
 
     # Accounts first: ensure_config() derives sip_transports from it, so
@@ -2936,12 +3108,16 @@ def main(argv: list[str]) -> int:
     p.add_argument("--limit", type=int, default=10)
     p.add_argument("--mark-seen", action="store_true",
                    help="record that the log has been looked at (clears the missed-call count)")
+    p.add_argument("--clear", action="store_true",
+                   help="empty the call log first (the result is the then-empty log)")
     p.set_defaults(func=cmd_history)
 
     p = sub.add_parser("contacts", help="list, add or remove contacts")
     p.add_argument("action", choices=["list", "add", "remove"], nargs="?", default="list")
     p.add_argument("uri", nargs="?")
     p.add_argument("--name")
+    p.add_argument("--replace", metavar="OLD_URI",
+                   help="with add: replace the contact saved as OLD_URI (keeping its parameters)")
     p.set_defaults(func=cmd_contacts)
 
     p = sub.add_parser("open", help="put a sip:/sips:/tel: link in the panel's dial field")
@@ -2975,7 +3151,13 @@ def main(argv: list[str]) -> int:
     p.add_argument("--display-name")
     p.add_argument("--transport", choices=["udp", "tcp", "tls"],
                    help="default: udp, or the current transport with --merge")
-    p.add_argument("--outbound")
+    p.add_argument("--outbound", help="a sip: or sips: address; empty clears it")
+    p.add_argument("--stun", metavar="SERVER",
+                   help="STUN server (host, host:port, optionally behind stun:/stuns:); "
+                        "empty clears it. Without it the stored one is kept")
+    p.add_argument("--codecs", metavar="LIST",
+                   help="audio codecs to offer: any of opus,g722,pcmu,pcma, comma-separated. "
+                        "Without it the stored list is kept")
     p.add_argument("--regint", type=int, help="default: 600, or the current value with --merge")
     p.add_argument("--merge", action="store_true",
                    help="keep the current value of every field not given, including the password")

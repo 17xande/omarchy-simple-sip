@@ -39,14 +39,18 @@ the whole thing works from the keyboard.
   pick a contact as you type. Incoming calls open the panel and ring with a real
   double-ring, not baresip's recorded voice.
 - **In-call controls** — mute, hold and resume, a keypad for voicemail PINs and
-  phone trees, and blind transfer.
+  phone trees, and blind transfer. The call screen says which codec the call
+  negotiated, next to the timer.
+- **A dial keypad** under the dial field, for numbers you would rather click.
 - **Recent calls** — made, received and missed, kept by the daemon so nothing is
-  lost across shell restarts; select a row to call back.
+  lost across shell restarts; select a row to call back. **All calls** opens the
+  whole log, and can clear it.
 - **Missed-call dot** on the bar icon until you look, and a **notification** that
   turns into "Missed call" — or disappears when you answer.
 - **Voicemail** — a count of new messages and a row that calls it.
 - **Contacts** — names instead of numbers everywhere, including notifications, and
-  suggestions in the dial field.
+  suggestions in the dial field. A contacts screen to search, add, edit, delete
+  and call them.
 - **Do not disturb** — calls go straight to voicemail and are still logged.
 - **`sip:` and `tel:` links** open the panel with the number filled in — never
   dialled for you.
@@ -54,6 +58,8 @@ the whole thing works from the keyboard.
   silence never means "the phone was broken".
 - **Keyboard first** — every action has a key, and everything has an IPC call for
   your own keybindings.
+- **Account options in the form** — an outbound proxy, a STUN server, and which
+  of Opus, G.722 and G.711 to offer.
 - **Echo cancellation** for laptop speakers, **media paused** during calls, an
   optional **call timer on the bar**.
 - **One account, one call at a time**, deliberately — see
@@ -112,6 +118,9 @@ printf '%s' "$PASSWORD" | omarchy-sip account set sip:1001@pbx.example.com \
 unset PASSWORD
 ```
 
+Past those, the form (and `account set`) takes an outbound proxy, a STUN server and
+the codecs to offer — see [Account options](#account-options).
+
 The address needs its user part — `sip:1001@pbx.example.com`, not
 `sip:pbx.example.com`; baresip refuses an account without one and registers
 nothing. Type only the server in the form and it is completed from the auth
@@ -141,11 +150,18 @@ including the stored SIP password.
 | Mute / unmute | click **Mute** during a call | `m` | `omarchy-shell io.github.17xande.simple-sip mute` |
 | Hold / resume | click **Hold** during an answered call | `p` | `omarchy-shell io.github.17xande.simple-sip hold` |
 | Keypad tones (DTMF) | click **Keypad**, then the digits | type `0`–`9` `*` `#`; `n` shows the keypad | `omarchy-shell io.github.17xande.simple-sip dtmf 1234#` |
+| Dial keypad | the keypad button beside **Call** | `n` (idle, cursor on the rows) | — |
 | Transfer (blind) | click **Transfer…**, enter the target | `t` | `omarchy-shell io.github.17xande.simple-sip transfer sip:1002@pbx` |
 | Do not disturb | click **Do not disturb** | `q` | `omarchy-shell io.github.17xande.simple-sip dnd` |
 | Redial last outgoing call | select it in Recent calls | — | `omarchy-shell io.github.17xande.simple-sip redial` |
 | Call voicemail | click **Voicemail** | `v` | — |
-| Save as contact | right-click a call | `c` on a row | `omarchy-sip contacts add …` |
+| Contacts screen | click **Contacts** | `o` | — |
+| Save as contact | right-click a call or a suggestion | `c` on a row | `omarchy-sip contacts add …` |
+| New / edit contact | **New contact** in the contacts screen; right-click a contact | `e` or `c` on a contact | `omarchy-sip contacts add … [--replace=OLD]` |
+| Delete contact | — | `x` or Delete on a contact, twice | `omarchy-sip contacts remove …` |
+| Whole call log | click **All calls** under Recent calls | `y` | `omarchy-sip history` |
+| Clear the call log | click **Clear history**, twice | — | `omarchy-sip history --clear` |
+| Back | — | Escape (out of a form, then a screen, then the panel) | — |
 | Account settings | click the gear row | `s` | — |
 
 Every IPC call answers `ok`, or `refused: <why>` when there was nothing to do. A
@@ -170,7 +186,7 @@ players that were playing are paused and resumed afterwards.
 | Pause media players during calls | on | MPRIS players; only those it paused are resumed |
 | Show the call timer on the bar | off | horizontal bars |
 | Mark the bar icon when a call was missed | on | |
-| Recent calls to show | 5 | 0 hides the list |
+| Recent calls to show | 5 | 0 hides the list (the **All calls** row stays) |
 | Voicemail number | — | blank uses the one the server announces |
 | Echo cancellation | off | for speakers without a headset; restarts the daemon |
 | Status resync interval | 60 s | |
@@ -190,7 +206,17 @@ mouse or the keyboard.
 The log is written by the daemon, not the panel, so a call that starts and ends while
 the shell is restarting is still recorded. It lives in
 `~/.config/omarchy-sip/history.jsonl` (mode `0600`, last 50 calls), and
-`historyLimit: 0` in the widget settings hides the section entirely.
+`historyLimit: 0` in the widget settings hides the list on the main screen.
+
+When the log holds more calls than the main screen shows, **All calls** (`y`) opens
+the history screen: every call kept, as the same rows — Enter calls back,
+right-click or `c` saves a contact — and **Clear history** at the end. It asks twice:
+the first press turns the row into "Clear all N calls? Press again", the second,
+within three seconds, clears; moving the cursor takes it back. From a terminal,
+`omarchy-sip history --clear` empties the log and prints what `history` prints.
+The clear replaces the file through the pinned directory rather than truncating it,
+and is safe with a call up: the daemon only touches the log when a call *ends*, so
+that call is simply logged afterwards.
 
 ### Do not disturb
 
@@ -210,20 +236,61 @@ nothing would be logged at all.
 
 ### Contacts
 
-Save a number from Recent calls with right-click, or move the cursor onto the row
-and press `c`; saving an empty name removes the contact. Saved names replace
-numbers in the call screen, Recent calls and the incoming-call notification.
+**Contacts** (`o`) opens the contacts screen: a search field (name or address, any
+case), **New contact**, then everybody saved, by name. Enter or a click calls a
+contact. Right-click or `e` edits one — name and number or address, both in one
+form, which is also where **Delete** is (it asks twice, like the row); `x` or Delete on a row asks first (the row
+says "Press x again to delete") and deletes on the second press within three
+seconds. Down from the search field moves onto the rows, Up from the first row comes
+back, and typing while the cursor is on the rows goes back into the search. Escape
+steps back to the main screen. On this screen letters are for searching, so the
+main screen's other shortcuts (`s`, `q`, `v`…) wait until you leave it.
+
+You can also save a number from Recent calls, All calls or the dial field's
+suggestions with right-click, or by moving the cursor onto the row and pressing
+`c`; it opens the same form with the address filled in. The address accepts what the
+dial field does — an extension, a phone number or a `sip:` address — and is checked
+before anything is written; an empty name is refused (use Delete). Saved names
+replace numbers in the call screen, Recent calls and the incoming-call notification.
 Typing in the dial field lists matching contacts under it — Down moves onto them,
 and Enter on a typed name calls the best match. From a terminal:
 
 ```bash
 omarchy-sip contacts                                  # list, as JSON
-omarchy-sip contacts add sip:1001@pbx.example.com --name "Front desk"
-omarchy-sip contacts remove sip:1001@pbx.example.com
+omarchy-sip contacts add --name="Front desk" -- sip:1001@pbx.example.com
+omarchy-sip contacts add --name="Front office" --replace=sip:1001@pbx.example.com -- sip:1002@pbx.example.com
+omarchy-sip contacts remove -- sip:1001@pbx.example.com
 ```
+
+`--replace=OLD` is how the form edits: the contact saved as `OLD` becomes this one
+in a single rewrite, keeping its parameters (like a rename does). It refuses an
+address that is already another contact, and an `OLD` that is not one. A caller block
+(`;access=block`) is never touched, and no contact is written for an address that is
+blocked — `add` and `--replace` both refuse, because baresip would otherwise find the
+contact first and let the caller through; unblock it by hand first.
 
 They are stored in baresip's own format in `~/.config/omarchy-sip/contacts`
 (`0600`), at most 200.
+
+### Account options
+
+Beyond the address, auth user, display name, password and transport, the form
+(**Account settings**, `s`) and `account set` take:
+
+| Form | `account set` | What it does |
+|---|---|---|
+| Outbound proxy | `--outbound=sip:proxy.example.com` | Sends everything through that proxy. A `sip:` or `sips:` address, or empty to clear. |
+| STUN server | `--stun=stun.example.com:3478` | For NAT traversal. `host`, `host:port`, or either behind `stun:` / `stuns:`; empty clears it. Writes `stunserver` and `medianat=stun`. |
+| Audio codecs | `--codecs=opus,g722,pcmu,pcma` | Which to offer, always in that order: Opus, G.722, G.711 µ-law, G.711 A-law. At least one. |
+
+A new account offers Opus, PCMU and PCMA, as before; G.722 is loaded but only offered
+when you switch it on. Clearing the STUN server removes `medianat` only when it is
+`stun` — an `ice` or `turn` you set by hand stays, and so does one when you add a
+server. If the stored codec list is something these switches cannot show (a rate
+or codec outside the four, written by hand), the form says so and leaves it alone;
+saving never sends a value for a field you did not change, so a proxy, STUN server or
+codec list written by hand survives a save. `account show` reports `outbound`, `stun`,
+`mediaNat`, `codecs` and `codecsCustom`.
 
 ### Links
 
@@ -318,9 +385,10 @@ omarchy-sip events                         stream the JSON event feed
 omarchy-sip dial <uri> | answer | hangup   call control
 omarchy-sip send <cmd> [params]            an allowed command, fire-and-forget
 omarchy-sip cmd  <cmd> [params]            ... and print the response
-omarchy-sip history [--limit N] [--mark-seen]   recent calls and the unseen-missed count
+omarchy-sip history [--limit N] [--mark-seen] [--clear]   the call log and the unseen-missed count
 omarchy-sip account show | set [--merge] | clear   account management
-omarchy-sip contacts [list | add <uri> --name N | remove <uri>]
+    set takes --auth-user, --display-name, --transport, --outbound, --stun, --codecs, --regint
+omarchy-sip contacts [list | add [--replace=OLD] --name N -- <uri> | remove -- <uri>]
 omarchy-sip option show | set <key> <on|off>     the daemon's own options
 omarchy-sip open <sip:/tel: link>          put a link in the panel's dial field
 omarchy-sip handler install | uninstall    make sip:/sips:/tel: links open the panel
@@ -328,7 +396,8 @@ omarchy-sip handler install | uninstall    make sip:/sips:/tel: links open the p
 
 `send`/`cmd` accept only the commands the daemon allows, each with its own
 parameter grammar: `dial`, `accept`, `hangup`, `mute yes|no`, `hold`, `resume`,
-`sndcode <digits>`, `transfer <uri>`, `reginfo` and `listcalls` — for example
+`sndcode <digits>`, `transfer <uri>`, `reginfo`, `listcalls` and `audio_debug` (what
+the panel reads the call's codec from) — for example
 `omarchy-sip cmd reginfo`. Anything else is refused with "command not permitted".
 
 Environment overrides:
@@ -571,6 +640,10 @@ sends them.
   baresip's command line only when it is printable ASCII without space, `=`, `;`,
   quotes or backslash. A notification button for a call that cannot be named does
   nothing.
+- The codec on the call screen is one line of baresip's `audio_debug` prose, read from
+  the first 8 KiB only, with a strict pattern (a plain name, a sample rate and a
+  channel count) and nothing else shown; anything else shows nothing. The command
+  takes no parameter and changes nothing.
 - A saved contact's name is lent to a caller matched only by extension when the call
   comes from the account's own domain or an IP literal — never to
   `sip:1001@somebody-elses-host`.

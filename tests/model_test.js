@@ -3,7 +3,7 @@
 const fs = require("fs");
 const src = fs.readFileSync(require("path").join(__dirname, "..", "Model.js"), "utf8");
 const M = {};
-new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,buildId,daemonStale,validCallId,typingGuard,isKeypadKey,parseMwi,validDigits,queueDigits,optionChanges,pickOptions,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,accountUri,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,barTooltip,lastOutbound,callTitle,domainOf,historyGlyph,parseHistory,voicemailTarget,tipLine,contactName,matchContacts,redialTarget,historyLabel,historyIsMissed,historyMeta,relativeTime});")(M);
+new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,buildId,daemonStale,validCallId,typingGuard,isKeypadKey,parseMwi,validDigits,queueDigits,optionChanges,pickOptions,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,accountUri,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,barTooltip,lastOutbound,callTitle,domainOf,historyGlyph,parseHistory,voicemailTarget,tipLine,contactName,matchContacts,redialTarget,historyLabel,historyIsMissed,historyMeta,relativeTime,filterContacts,contactForm,codecIds,toggleCodec,codecArg,parseCodec,CODEC_CHOICES,DEFAULT_CODECS});")(M);
 
 let fails = 0;
 const ESC = String.fromCharCode(27);
@@ -261,6 +261,91 @@ t("rel unset", M.relativeTime(0, NOW), "");
 t("fmt duration 0", M.formatDuration(0), "00:00");
 t("fmt duration 72", M.formatDuration(72), "01:12");
 t("fmt duration 3725", M.formatDuration(3725), "1:02:05");
+
+
+// -- the contacts screen
+const BOOK2 = [
+  { name: "mum", uri: "sip:+15550100@gw.example.com" },
+  { name: "Front desk", uri: "sip:1001@pbx.example.com" },
+  { name: "", uri: "sip:0900@pbx.example.com" },
+  { name: "Alice", uri: "sip:alice@other.example" },
+  { name: "Desk two", uri: "sip:1002@pbx.example.com" },
+];
+t("filterContacts lists all, sorted by name regardless of case, nameless by user part",
+  M.filterContacts("", BOOK2).map(c => c.uri),
+  ["sip:0900@pbx.example.com", "sip:alice@other.example", "sip:1002@pbx.example.com", "sip:1001@pbx.example.com", "sip:+15550100@gw.example.com"]);
+t("filterContacts by name, case-insensitively", M.filterContacts("DESK", BOOK2).map(c => c.name), ["Desk two", "Front desk"]);
+t("filterContacts by address", M.filterContacts("1001", BOOK2).map(c => c.name), ["Front desk"]);
+t("filterContacts by host", M.filterContacts("OTHER.example", BOOK2).map(c => c.name), ["Alice"]);
+t("filterContacts ignores a pasted sip: prefix", M.filterContacts("sip:1002@pbx", BOOK2).map(c => c.name), ["Desk two"]);
+t("filterContacts finds nobody", M.filterContacts("zzz", BOOK2), []);
+t("filterContacts blank is everybody", M.filterContacts("   ", BOOK2).length, 5);
+t("filterContacts has no book", M.filterContacts("a", undefined), []);
+const book2Order = BOOK2.map(c => c.name); M.filterContacts("", BOOK2);
+t("filterContacts leaves its input alone", BOOK2.map(c => c.name), book2Order);
+t("filterContacts skips a null entry", M.filterContacts("", [null, BOOK2[0]]).length, 1);
+
+const PBX = "sip:me@pbx.example.com";
+t("contactForm saves a new contact", M.contactForm("  Bob  Smith ", "1005", PBX, "", BOOK2),
+  { error: "", remove: false, uri: "sip:1005@pbx.example.com", name: "Bob Smith" });
+t("contactForm completes a number like the dial field", M.contactForm("Mum", "+1 (555) 010-0100", PBX, "", []).uri, "sip:+15550100100@pbx.example.com");
+t("contactForm keeps a full address", M.contactForm("X", "sips:x@h.example:5061", PBX, "", []).uri, "sips:x@h.example:5061");
+t("contactForm edits an existing contact in place", M.contactForm("Front office", "1001", PBX, "sip:1001@pbx.example.com", BOOK2),
+  { error: "", remove: false, uri: "sip:1001@pbx.example.com", name: "Front office" });
+t("contactForm moves a contact to a free address", M.contactForm("Front desk", "2001", PBX, "sip:1001@pbx.example.com", BOOK2).uri, "sip:2001@pbx.example.com");
+t("contactForm refuses an address that is another contact", M.contactForm("Front desk", "1002", PBX, "sip:1001@pbx.example.com", BOOK2),
+  { error: "Already saved as Desk two", remove: false, uri: "", name: "" });
+t("contactForm refuses a new contact on a saved address", M.contactForm("Again", "1001", PBX, "", BOOK2).error, "Already saved as Front desk");
+t("contactForm: an empty name on a saved contact is refused, not a delete",
+  M.contactForm("  ", "whatever", PBX, "sip:1001@pbx.example.com", BOOK2),
+  { error: "Use Delete to remove this contact", remove: false, uri: "", name: "" });
+t("contactForm: an empty name on a new contact is refused", M.contactForm("", "1005", PBX, "", BOOK2).error, "Give the contact a name");
+t("contactForm: no number is refused", M.contactForm("Bob", "  ", PBX, "", BOOK2).error, "Enter a number or address");
+t("contactForm refuses an address with parameters", M.contactForm("Bob", "sip:bob@h;transport=tcp", PBX, "", []).error,
+  "Not a number or address that can be dialled");
+t("contactForm refuses an address with a quote", M.contactForm("Bob", 'sip:b"@h', PBX, "", []).error,
+  "Not a number or address that can be dialled");
+for (const bad of ['a"b', "a<b", "a>b", "a;b", "a\\b"])
+  t("contactForm refuses a name containing " + bad, M.contactForm(bad, "1", PBX, "", []).error.indexOf("A name cannot contain"), 0);
+t("contactForm refuses an overlong name", M.contactForm("n".repeat(129), "1", PBX, "", []).error, "That name is too long");
+t("contactForm accepts the longest name", M.contactForm("n".repeat(128), "1", PBX, "", []).error, "");
+
+// -- account codecs
+t("codec choices are in the fixed order", M.CODEC_CHOICES.map(c => c.id), ["opus", "g722", "pcmu", "pcma"]);
+t("codecIds reads the stored list in the fixed order", M.codecIds({ codecs: ["pcma", "opus", "g722"] }), ["opus", "g722", "pcma"]);
+t("codecIds defaults when there is no list", M.codecIds({ codecs: [] }), ["opus", "pcmu", "pcma"]);
+t("codecIds defaults with no details", M.codecIds(undefined), ["opus", "pcmu", "pcma"]);
+t("codecIds ignores what it does not know", M.codecIds({ codecs: ["speex", "pcmu", 7] }), ["pcmu"]);
+t("codecIds ignores a list that is not one", M.codecIds({ codecs: "opus" }), ["opus", "pcmu", "pcma"]);
+t("toggleCodec turns one on, in order", M.toggleCodec(["opus", "pcma"], "g722"), ["opus", "g722", "pcma"]);
+t("toggleCodec turns one off", M.toggleCodec(["opus", "g722"], "opus"), ["g722"]);
+t("toggleCodec keeps the last one on", M.toggleCodec(["pcmu"], "pcmu"), ["pcmu"]);
+t("toggleCodec leaves its input alone", (() => { const e = ["opus", "pcmu"]; M.toggleCodec(e, "opus"); return e; })(), ["opus", "pcmu"]);
+t("codecArg joins in the fixed order", M.codecArg(["pcma", "opus", "g722"]), "opus,g722,pcma");
+t("codecArg ignores unknown ids", M.codecArg(["opus", "speex"]), "opus");
+
+// -- the negotiated codec, from baresip's audio_debug
+const AUDIO = [
+  "", "--- Audio stream ---",
+  " tx:   encode: opus 48000Hz/2ch ptime=20ms L16", " rx:   decode: opus 48000Hz/2ch",
+  " aubuf: ...", ""].join("\n");
+t("parseCodec opus", M.parseCodec(AUDIO), "opus 48 kHz");
+t("parseCodec G722 is 16 kHz", M.parseCodec(" tx:   encode: G722 16000Hz/1ch ptime=20ms S16LE"), "G722 16 kHz");
+t("parseCodec PCMU", M.parseCodec(" tx:   encode: PCMU 8000Hz/1ch ptime=20ms"), "PCMU 8 kHz");
+t("parseCodec a fractional rate", M.parseCodec("tx: encode: x 22050Hz/1ch"), "x 22.1 kHz");
+t("parseCodec through ANSI colour", M.parseCodec(ESC + "[1m tx:   encode: PCMA 8000Hz/1ch ptime=20ms" + ESC + "[0m"), "PCMA 8 kHz");
+t("parseCodec ignores the decode line alone", M.parseCodec(" rx:   decode: opus 48000Hz/2ch"), "");
+t("parseCodec empty", M.parseCodec(""), "");
+t("parseCodec nothing", M.parseCodec(undefined), "");
+t("parseCodec no stream yet", M.parseCodec("audio stream is not running"), "");
+t("parseCodec refuses a name with markup", M.parseCodec(" tx: encode: <b>x</b> 8000Hz/1ch"), "");
+t("parseCodec refuses a name with a space or odd character", M.parseCodec(" tx: encode: a;b 8000Hz/1ch"), "");
+t("parseCodec refuses an absurd rate", M.parseCodec(" tx: encode: x 999999Hz/1ch"), "");
+t("parseCodec refuses a name that is too long", M.parseCodec(" tx: encode: " + "n".repeat(40) + " 8000Hz/1ch"), "");
+t("parseCodec refuses trailing junk on the rate", M.parseCodec(" tx: encode: x 8000Hzjunk/1ch"), "");
+t("parseCodec only reads the start of a huge reply", M.parseCodec("z".repeat(9000) + "\n tx: encode: opus 48000Hz/2ch"), "");
+t("parseCodec reads a line anywhere in a normal reply", M.parseCodec("a\nb\n tx: encode: opus 48000Hz/2ch\n"), "opus 48 kHz");
+t("parseCodec must start the line", M.parseCodec("hello tx: encode: opus 48000Hz/2ch"), "");
 
 console.log(fails === 0 ? "\nall passed" : `\n${fails} FAILED`);
 process.exit(fails ? 1 : 0);

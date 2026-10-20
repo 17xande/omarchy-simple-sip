@@ -300,7 +300,67 @@ function peerShort(uri) {
   return at > 0 ? label.substring(0, at) : label
 }
 
+// ------------------------------------------------------------ account codecs
+
+// The codecs the setup form offers, in the order they are offered; the ids are
+// the ones `omarchy-sip account set --codecs` takes and `account show` reports.
+var CODEC_CHOICES = [
+  { id: "opus", label: "Opus" },
+  { id: "g722", label: "G.722" },
+  { id: "pcmu", label: "G.711 \u00b5-law (PCMU)" },
+  { id: "pcma", label: "G.711 A-law (PCMA)" }
+]
+
+// What a new account offers, and what an account that names no list shows.
+var DEFAULT_CODECS = ["opus", "pcmu", "pcma"]
+
+// The ids to show as on for `account show`'s report: the known ones, in the
+// fixed order, or the default when it names none.
+function codecIds(details) {
+  var given = details && Array.isArray(details.codecs) ? details.codecs : []
+  var out = []
+  for (var i = 0; i < CODEC_CHOICES.length; i++) {
+    if (given.indexOf(CODEC_CHOICES[i].id) >= 0) out.push(CODEC_CHOICES[i].id)
+  }
+  return out.length > 0 ? out : DEFAULT_CODECS.slice()
+}
+
+// The enabled ids with one flipped -- or unchanged when that would leave none:
+// an account that offers no codec cannot call anyone.
+function toggleCodec(enabled, id) {
+  var on = (enabled || []).indexOf(id) >= 0
+  var out = []
+  for (var i = 0; i < CODEC_CHOICES.length; i++) {
+    var cid = CODEC_CHOICES[i].id
+    var wanted = cid === id ? !on : (enabled || []).indexOf(cid) >= 0
+    if (wanted) out.push(cid)
+  }
+  return out.length > 0 ? out : (enabled || []).slice()
+}
+
+// The value of `--codecs`: the enabled ids, comma-separated, in the fixed order.
+function codecArg(enabled) {
+  var out = []
+  for (var i = 0; i < CODEC_CHOICES.length; i++) {
+    if ((enabled || []).indexOf(CODEC_CHOICES[i].id) >= 0) out.push(CODEC_CHOICES[i].id)
+  }
+  return out.join(",")
+}
+
 // ------------------------------------------------------------- presentation
+
+// The codec an established call is using, from baresip's `audio_debug`, which
+// prints a line like " tx:   encode: opus 48000Hz/2ch ptime=20ms L16". Only
+// that exact shape is read, from the first few KiB: the reply is prose from
+// another program, shown on screen. "opus 48 kHz", or "" when it is not there.
+function parseCodec(text) {
+  var clipped = stripAnsi(String(text || "").substring(0, 8192))
+  var m = clipped.match(/^[ \t]*tx:[ \t]+encode:[ \t]+([A-Za-z0-9][A-Za-z0-9._-]{0,31})[ \t]+([0-9]{4,6})Hz\/([0-9]{1,2})ch(?=[ \t]|$)/m)
+  if (!m) return ""
+  var rate = parseInt(m[2], 10)
+  if (rate < 1000 || rate > 192000) return ""
+  return m[1] + " " + (Math.round(rate / 100) / 10) + " kHz"
+}
 
 // Live timer: empty until a call actually starts.
 function durationText(startedAtMs, nowMs) {
@@ -470,6 +530,60 @@ function matchContacts(query, contacts, limit) {
     else if (name.indexOf(q) > 0) contains.push(c)
   }
   return starts.concat(contains).slice(0, limit || 5)
+}
+
+// The contacts screen: the saved contacts matching what is typed in its search
+// field, by name or by address (case-insensitive, and a pasted `sip:` prefix is
+// not part of what is searched for), sorted by name -- a contact with no name
+// sorts by the user part of its address. Nothing typed lists them all.
+function filterContacts(query, contacts) {
+  var q = String(query || "").trim().toLowerCase().replace(/^sips?:/, "")
+  var list = []
+  var source = contacts || []
+  for (var i = 0; i < source.length; i++) {
+    var c = source[i]
+    if (!c) continue
+    var name = String(c.name || "")
+    if (q !== "" && name.toLowerCase().indexOf(q) < 0
+        && peerLabel(c.uri).toLowerCase().indexOf(q) < 0) continue
+    list.push(c)
+  }
+  function key(c) { return (String(c.name || "") || peerShort(c.uri)).toLowerCase() }
+  return list.sort(function(a, b) {
+    var ka = key(a), kb = key(b)
+    if (ka !== kb) return ka < kb ? -1 : 1
+    return String(a.uri) < String(b.uri) ? -1 : (String(a.uri) > String(b.uri) ? 1 : 0)
+  })
+}
+
+// What the contact form asks to be done, or why it cannot be. `original` is the
+// address the contact is saved under now ("" for a new one), so that moving it
+// onto somebody else's address is refused here instead of by the CLI, and an
+// empty name is told to use Delete rather than removing the contact by
+// accident. The address goes through the same
+// completion and grammar as a number typed into the dial field; the name is
+// held to the CLI's own rules (no quote, brackets, semicolon or backslash).
+function contactForm(name, number, aor, original, contacts) {
+  var n = String(name || "").split(/\s+/).join(" ").trim()
+  var old = String(original || "")
+  var target = normalizeTarget(number, aor)
+  if (n === "" && old !== "")
+    return { error: "Use Delete to remove this contact", remove: false, uri: "", name: "" }
+  if (n === "") return { error: "Give the contact a name", remove: false, uri: "", name: "" }
+  if (n.length > 128) return { error: "That name is too long", remove: false, uri: "", name: "" }
+  var bad = n.match(/["<>;\\]/)
+  if (bad) return { error: "A name cannot contain " + bad[0], remove: false, uri: "", name: "" }
+  if (target === "") return { error: "Enter a number or address", remove: false, uri: "", name: "" }
+  if (!validTarget(target))
+    return { error: "Not a number or address that can be dialled", remove: false, uri: "", name: "" }
+  var list = contacts || []
+  if (target !== old) {
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && list[i].uri === target)
+        return { error: "Already saved as " + (list[i].name || peerShort(target)), remove: false, uri: "", name: "" }
+    }
+  }
+  return { error: "", remove: false, uri: target, name: n }
 }
 
 // "3m ago · 01:12" / "just now · Missed" / "2d ago · No answer"

@@ -494,6 +494,176 @@ check("parse_account_line clips an oversized value",
       len(mod.parse_account_line("<sip:a@b>;auth_user=" + "x" * 5000)["params"]["auth_user"]) <= 256)
 
 
+# ------------------------------------------------- outbound, STUN and codecs
+
+# Three more things the setup form edits. Each is a value a person types into a
+# line that baresip reads as `;key=value` fields, so each is checked against its
+# own grammar before it is written -- and each is left exactly as it was when the
+# form says nothing about it.
+
+def acct_text():
+    return open(path("merge/accounts")).read()
+
+
+def put_account(line):
+    with open(path("merge/accounts"), "w") as fh:
+        fh.write(line + "\n")
+
+
+BASE = "<sip:1001@pbx.example.com>;auth_user=u;auth_pass=pw;transport=udp"
+
+put_account(BASE)
+good = {
+    "sip:proxy.example.com": "sip:proxy.example.com",
+    "sips:proxy.example.com:5061": "sips:proxy.example.com:5061",
+    "sip:user@proxy.example.com:5060": "sip:user@proxy.example.com:5060",
+    "sip:[2001:db8::1]:5060": "sip:[2001:db8::1]:5060",
+}
+for value, want in good.items():
+    r = sip("account", "set", "--merge", f"--outbound={value}", stdin=b"")
+    check(f"an outbound proxy of {value} is accepted",
+          r.returncode == 0 and stored_account()["params"].get("outbound") == want)
+put_account(BASE + ';outbound="sip:keep.example.com"')
+for bad in ("proxy.example.com", "http://proxy.example.com", "sip:", "sip:a b", "sip:a<b", "-sip:x",
+            "sip:,", "sip:@h", "sip:a\x01b", "sip:caf\u00e9.example.com", "sip:h:99999x", "sips:[zz]"):
+    r = sip("account", "set", "--merge", f"--outbound={bad}", stdin=b"")
+    check(f"an outbound proxy of {bad!r} is refused, and the stored one kept",
+          r.returncode != 0 and b"outbound proxy" in r.stderr and "keep.example.com" in acct_text())
+r = sip("account", "set", "--merge", "--outbound=sip:p.example.com;transport=tcp", stdin=b"")
+check("an outbound proxy with a parameter is still refused as a field", r.returncode != 0)
+r = sip("account", "set", "--merge", "--outbound=", stdin=b"")
+check("an empty outbound proxy clears it", r.returncode == 0 and "outbound" not in stored_account()["params"])
+put_account(BASE + ";outbound=not-a-uri")
+r = sip("account", "set", "--merge", "--display-name=X", stdin=b"")
+check("a stored outbound proxy nobody asked to change is carried through, whatever it is",
+      r.returncode == 0 and stored_account()["params"].get("outbound") == "not-a-uri")
+
+# -- STUN
+for value, want in (
+    ("stun.example.com", "stun:stun.example.com"),
+    ("stun.example.com:3478", "stun:stun.example.com:3478"),
+    ("stun:stun.example.com", "stun:stun.example.com"),
+    ("stuns:stun.example.com:5349", "stuns:stun.example.com:5349"),
+    ("STUN:Stun.Example.com:3478", "stun:Stun.Example.com:3478"),
+    ("stun:3478", "stun:stun:3478"),
+    ("192.0.2.7:3478", "stun:192.0.2.7:3478"),
+    ("[2001:db8::1]:3478", "stun:[2001:db8::1]:3478"),
+    ("stuns:[2001:db8::1]", "stuns:[2001:db8::1]"),
+    (" stun.example.com:03478 ", "stun:stun.example.com:3478"),
+):
+    put_account(BASE)
+    r = sip("account", "set", "--merge", f"--stun={value}", stdin=b"")
+    line = acct_text()
+    check(f"--stun={value!r} is stored as {want}",
+          r.returncode == 0 and stored_account()["params"].get("stunserver") == want
+          and f'stunserver="{want}"' in line)
+    check("... with medianat=stun beside it, once",
+          line.count("medianat=stun") == 1 and line.count("stunserver") == 1)
+for bad in ("stun.example.com:0", "stun.example.com:65536", "stun.example.com:abc", "stun.example.com:",
+            "user:pw@stun.example.com", "-stun.example.com", ".example.com", "http://stun.example.com",
+            "stun:", "turn:stun.example.com", "a..b", "a.-b.c", "-a.b", "a.b.", "a-.b", "stun.example.com/x", "stun example.com", "a;b",
+            'a"b', "stun.example.com\nx", "[zzz]:3478", "[2001:db8::1", "stun." + "a" * 300, "12345"):
+    put_account(BASE + ';stunserver="stun:keep.example.com"')
+    r = sip("account", "set", "--merge", f"--stun={bad}", stdin=b"")
+    check(f"--stun={bad[:30]!r} is refused, and the stored server kept",
+          r.returncode != 0 and "keep.example.com" in acct_text())
+put_account(BASE)
+check("a long hostname of ordinary labels still fits",
+      sip("account", "set", "--merge", "--stun=" + ".".join(["a" * 50] * 3), stdin=b"").returncode == 0)
+put_account(BASE)
+check("a label over 63 characters is refused",
+      sip("account", "set", "--merge", "--stun=" + "a" * 64 + ".example.com", stdin=b"").returncode != 0)
+
+put_account(BASE + ';stunserver="stun:old.example.com";medianat=stun;mediaenc=srtp-mand')
+sip("account", "set", "--merge", "--stun=", stdin=b"")
+cleared = acct_text()
+check("an empty --stun removes the server and the stun it was for",
+      "stunserver" not in cleared and "medianat" not in cleared)
+check("... and nothing else", "mediaenc=srtp-mand" in cleared)
+put_account(BASE + ';stunserver="stun:old.example.com";medianat=ice')
+sip("account", "set", "--merge", "--stun=", stdin=b"")
+check("an empty --stun leaves an ice or turn set by hand",
+      "stunserver" not in acct_text() and "medianat=ice" in acct_text())
+put_account(BASE + ";medianat=turn")
+sip("account", "set", "--merge", "--stun=stun.example.com", stdin=b"")
+check("a STUN server does not replace the ice or turn already chosen",
+      acct_text().count("medianat") == 1 and "medianat=turn" in acct_text()
+      and 'stunserver="stun:stun.example.com"' in acct_text())
+put_account(BASE + ';Stunserver="stun:old.example.com";MEDIANAT=stun;stunserver="stun:second.example.com"')
+sip("account", "set", "--merge", "--stun=new.example.com", stdin=b"")
+rewritten = acct_text()
+check("a rewritten STUN server leaves no case-variant behind to out-vote it",
+      rewritten.lower().count("stunserver") == 1 and "old.example.com" not in rewritten
+      and "second.example.com" not in rewritten and rewritten.lower().count("medianat") == 1)
+put_account(BASE + ';Stunserver="stun:old.example.com";MEDIANAT=stun;stunserver="stun:second.example.com";medianat=ice')
+sip("account", "set", "--merge", "--display-name=X", stdin=b"")
+kept = acct_text()
+check("without --stun the stored server and nat are carried through, exactly once each",
+      kept.lower().count("stunserver") == 1 and 'Stunserver="stun:old.example.com"' in kept
+      and kept.lower().count("medianat") == 1 and "MEDIANAT=stun" in kept)
+put_account(BASE + ';stunserver="stun:stun.example.com:3478";medianat=stun')
+shown = json.loads(sip("account", "show").stdout)
+check("account show reports the server as stored, and the nat",
+      shown.get("stun") == "stun:stun.example.com:3478" and shown.get("mediaNat") == "stun")
+put_account(BASE)
+shown = json.loads(sip("account", "show").stdout)
+check("account show reports no STUN server and no nat as empty", shown.get("stun") == "" and shown.get("mediaNat") == "")
+
+# -- codecs
+DEFAULT = "audio_codecs=opus/48000/2,PCMU/8000/1,PCMA/8000/1"
+put_account("<sip:1001@pbx.example.com>")
+r = sip("account", "set", "--merge", stdin=b"")
+check("a new account still offers opus, PCMU and PCMA by default",
+      r.returncode == 0 and DEFAULT in acct_text() and "G722" not in acct_text())
+for value, want in (
+    ("opus,g722,pcmu,pcma", "opus/48000/2,G722/16000/1,PCMU/8000/1,PCMA/8000/1"),
+    ("pcma,g722,opus", "opus/48000/2,G722/16000/1,PCMA/8000/1"),
+    ("g722", "G722/16000/1"),
+    (" PCMU , Opus ", "opus/48000/2,PCMU/8000/1"),
+):
+    put_account(BASE)
+    r = sip("account", "set", "--merge", f"--codecs={value}", stdin=b"")
+    check(f"--codecs={value!r} is written in the fixed order",
+          r.returncode == 0 and acct_text().count("audio_codecs") == 1
+          and f"audio_codecs={want}" in acct_text())
+for bad in ("", "opus,opus", "speex", "opus,,pcmu", "opus;pcmu", "opus/48000/2", "g729", "opus pcmu", ","):
+    put_account(BASE + ";audio_codecs=PCMU/8000/1")
+    r = sip("account", "set", "--merge", f"--codecs={bad}", stdin=b"")
+    check(f"--codecs={bad!r} is refused, and the stored list kept",
+          r.returncode != 0 and "audio_codecs=PCMU/8000/1" in acct_text())
+put_account(BASE + ";audio_codecs=opus/16000/1,PCMU/8000/1")
+sip("account", "set", "--merge", "--display-name=X", stdin=b"")
+check("without --codecs a hand-made list is carried through verbatim, and not doubled",
+      "audio_codecs=opus/16000/1,PCMU/8000/1" in acct_text() and acct_text().count("audio_codecs") == 1)
+put_account(BASE + ";Audio_Codecs=opus/16000/1")
+sip("account", "set", "--merge", "--display-name=X", stdin=b"")
+check("... whatever the case of its key, so the default cannot out-vote it",
+      acct_text().lower().count("audio_codecs") == 1 and "Audio_Codecs=opus/16000/1" in acct_text())
+put_account(BASE + ";Audio_Codecs=opus/16000/1;audio_codecs=PCMU/8000/1")
+sip("account", "set", "--merge", "--codecs=pcma", stdin=b"")
+check("--codecs replaces a list wherever it was and however it was spelt",
+      acct_text().lower().count("audio_codecs") == 1 and "audio_codecs=PCMA/8000/1" in acct_text())
+
+for line, want, custom in (
+    (BASE, [], False),
+    (BASE + ";audio_codecs=opus/48000/2,PCMU/8000/1,PCMA/8000/1", ["opus", "pcmu", "pcma"], False),
+    (BASE + ";audio_codecs=PCMA/8000/1,g722/16000/1,OPUS/48000/2", ["opus", "g722", "pcma"], False),
+    (BASE + ";audio_codecs=opus/48000/2,speex/8000/1", ["opus"], True),
+    (BASE + ";audio_codecs=opus/16000/1", [], True),
+    (BASE + ";audio_codecs=PCMU/8000", ["pcmu"], False),
+    (BASE + ";audio_codecs=pcma/8000,G722/16000", ["g722", "pcma"], False),
+    (BASE + ";audio_codecs=opus/48000", [], True),
+    (BASE + ";audio_codecs=G722/8000/1", [], True),
+):
+    put_account(line)
+    shown = json.loads(sip("account", "show").stdout)
+    check(f"account show reads {line.split(';')[-1][:60]!r} as {want}, custom={custom}",
+          shown.get("codecs") == want and shown.get("codecsCustom") is custom)
+check("the generated baresip config loads the G.722 module",
+      "module\t\t\tg722.so" in mod.BARESIP_CONFIG
+      and "module\t\t\tg722.so" in open(path("merge/config")).read())
+
+
 # --------------------------------------------------------- command dispatch
 
 # The client wire protocol is unchanged from the ctrl_tcp days, but it is now
@@ -588,6 +758,10 @@ check("dispatch transfers to a dialable target",
 check("dispatch refuses a transfer target the dial grammar would refuse",
       all(dispatched(('{"command":"transfer","params":"%s"}' % v).encode())[0] == []
           for v in ("sip:a@b;quit", "sip:a@b quit", "1002", "")))
+check("dispatch allows audio_debug, which takes no parameter",
+      dispatched(b'{"command":"audio_debug","token":"t"}') == ([("audio_debug", "t")], []))
+check("dispatch refuses audio_debug with a parameter",
+      dispatched(b'{"command":"audio_debug","params":"x","token":"t"}')[0] == [])
 check("dispatch ignores malformed JSON", dispatched(b"not json") == ([], []))
 check("dispatch ignores a non-object", dispatched(b'["dial"]') == ([], []))
 check("dispatch clips an overlong token on the accepted path",
