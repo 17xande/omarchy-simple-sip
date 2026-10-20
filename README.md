@@ -10,14 +10,18 @@ heavily fenced helper drives it; the panel follows your theme.
 ![baresip](https://img.shields.io/badge/engine-baresip%204.x-blue)
 
 <p align="center">
-  <img src="preview.png" width="342" alt="The Simple SIP panel under the bar: the account and two new voicemails in the header, a dial field, Voicemail, Do not disturb and Account settings rows, then Recent calls — a missed call from a saved contact, an outgoing call, an answered one from an extension and an unanswered number.">
+  <img src="preview.png" width="342" alt="The Simple SIP panel under the bar: the account and two new voicemails in the header, a dial field with keypad and call buttons, Voicemail, Do not disturb, Contacts (7 saved) and Account settings rows, then Recent calls — a missed call from a saved contact, outgoing and answered calls, a missed call from an extension — and an All calls row.">
 </p>
 
 | A call coming in | In a call |
 |---|---|
-| <img src="docs/screenshots/incoming.png" width="342" alt="An incoming call from the saved contact Sam Rivera, with Answer and Reject rows."> | <img src="docs/screenshots/active.png" width="342" alt="A call in progress with Front desk: muted, 00:05 on the timer, keypad tones sent, and rows for Unmute, Hold, Keypad, Transfer and Hang up."> |
-| **Do not disturb** | **Setting up an account** |
-| <img src="docs/screenshots/dnd.png" width="342" alt="Do not disturb switched on: a crossed-out bell in the bar and the header, and the row reading On — calls go to voicemail."> | <img src="docs/screenshots/setup.png" width="342" alt="The account form: address, auth username, display name, password and transport."> |
+| <img src="docs/screenshots/incoming.png" width="342" alt="An incoming call from the saved contact Sam Rivera, with Answer and Reject rows."> | <img src="docs/screenshots/active.png" width="342" alt="A call in progress with Front desk: muted, 00:07 on the timer with the negotiated codec, opus 48 kHz, keypad tones sent, and rows for Unmute, Hold, Keypad, Transfer and Hang up."> |
+| **Contacts** | **All calls** |
+| <img src="docs/screenshots/contacts.png" width="342" alt="The Contacts screen: a search field, a New contact row, and seven saved contacts sorted by name, each with its address."> | <img src="docs/screenshots/history.png" width="342" alt="The All calls screen: the whole kept call log, with missed calls in red and the duration of each answered one."> |
+| **The dial keypad** | **Do not disturb** |
+| <img src="docs/screenshots/keypad.png" width="342" alt="The main screen with the dial keypad open under the dial field."> | <img src="docs/screenshots/dnd.png" width="342" alt="Do not disturb switched on: a crossed-out bell in the header, and the row reading On — calls go to voicemail."> |
+| **Setting up an account** | **Account settings** |
+| <img src="docs/screenshots/setup.png" width="342" alt="The empty account form: address, auth username, display name, password, transport, outbound proxy, STUN server, and the audio codec toggles."> | <img src="docs/screenshots/account.png" width="342" alt="The account form filled in for sip:1002@pbx.example.com over TLS, with an outbound proxy, a STUN server and the codec toggles."> |
 
 <p align="center">
   <img src="docs/screenshots/bar-states.png" width="620" alt="The bar icon in four states: a phone with a red dot for a missed call, a red phone while ringing, a filled square phone during a call, and a crossed-out bell for Do not disturb.">
