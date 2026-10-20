@@ -3,7 +3,7 @@
 const fs = require("fs");
 const src = fs.readFileSync(require("path").join(__dirname, "..", "Model.js"), "utf8");
 const M = {};
-new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,buildId,daemonStale,validCallId,typingGuard,isKeypadKey,parseMwi,validDigits,queueDigits,optionChanges,pickOptions,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,accountUri,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,barTooltip,lastOutbound,callTitle,domainOf,historyGlyph,parseHistory,voicemailTarget,tipLine,contactName,matchContacts,redialTarget,historyLabel,historyIsMissed,historyMeta,relativeTime,filterContacts,contactForm,codecIds,toggleCodec,codecArg,parseCodec,CODEC_CHOICES,DEFAULT_CODECS});")(M);
+new Function("exports", src + "\nObject.assign(exports,{stripAnsi,classifyEvent,buildId,daemonStale,validCallId,typingGuard,isKeypadKey,parseMwi,validDigits,queueDigits,optionChanges,pickOptions,validTarget,parseReginfo,parseCallCount,parseIncomingCall,normalizeTarget,accountUri,peerLabel,peerShort,durationText,formatDuration,barGlyph,heroMeta,barTooltip,lastOutbound,callTitle,domainOf,historyGlyph,parseHistory,voicemailTarget,tipLine,contactName,matchContacts,redialTarget,historyLabel,historyIsMissed,historyMeta,relativeTime,filterContacts,contactForm,codecIds,toggleCodec,codecArg,parseCodec,viewPlan,CODEC_CHOICES,DEFAULT_CODECS});")(M);
 
 let fails = 0;
 const ESC = String.fromCharCode(27);
@@ -346,6 +346,20 @@ t("parseCodec refuses trailing junk on the rate", M.parseCodec(" tx: encode: x 8
 t("parseCodec only reads the start of a huge reply", M.parseCodec("z".repeat(9000) + "\n tx: encode: opus 48000Hz/2ch"), "");
 t("parseCodec reads a line anywhere in a normal reply", M.parseCodec("a\nb\n tx: encode: opus 48000Hz/2ch\n"), "opus 48 kHz");
 t("parseCodec must start the line", M.parseCodec("hello tx: encode: opus 48000Hz/2ch"), "");
+
+const idle = { callState: "idle", daemonUp: true, configured: true };
+t("viewPlan contacts", M.viewPlan("contacts", idle), { view: "contacts", dialPad: false, setup: false });
+t("viewPlan history", M.viewPlan("history", idle), { view: "history", dialPad: false, setup: false });
+t("viewPlan keypad opens the dial keypad on main", M.viewPlan("keypad", idle), { view: "main", dialPad: true, setup: false });
+t("viewPlan main closes the keypad", M.viewPlan("main", idle), { view: "main", dialPad: false, setup: false });
+t("viewPlan setup", M.viewPlan("setup", idle), { view: "main", dialPad: false, setup: true });
+t("viewPlan refuses during a call", M.viewPlan("contacts", { callState: "active", daemonUp: true, configured: true }).refused !== undefined, true);
+t("viewPlan refuses while ringing, even setup", M.viewPlan("setup", { callState: "incoming", daemonUp: true, configured: true }).refused !== undefined, true);
+t("viewPlan refuses a screen with the daemon down", M.viewPlan("contacts", { callState: "idle", daemonUp: false, configured: true }).refused !== undefined, true);
+t("viewPlan allows setup with the daemon down", M.viewPlan("setup", { callState: "idle", daemonUp: false, configured: false }).setup, true);
+t("viewPlan refuses a screen with no account", M.viewPlan("history", { callState: "idle", daemonUp: true, configured: false }).refused !== undefined, true);
+t("viewPlan refuses an unknown name", M.viewPlan("../x", idle).refused !== undefined, true);
+t("viewPlan refuses no state at all", M.viewPlan("main", undefined).refused !== undefined, true);
 
 console.log(fails === 0 ? "\nall passed" : `\n${fails} FAILED`);
 process.exit(fails ? 1 : 0);

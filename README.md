@@ -150,19 +150,28 @@ including the stored SIP password.
 | Mute / unmute | click **Mute** during a call | `m` | `omarchy-shell io.github.17xande.simple-sip mute` |
 | Hold / resume | click **Hold** during an answered call | `p` | `omarchy-shell io.github.17xande.simple-sip hold` |
 | Keypad tones (DTMF) | click **Keypad**, then the digits | type `0`–`9` `*` `#`; `n` shows the keypad | `omarchy-shell io.github.17xande.simple-sip dtmf 1234#` |
-| Dial keypad | the keypad button beside **Call** | `n` (idle, cursor on the rows) | — |
+| Dial keypad | the keypad button beside **Call** | `n` (idle, cursor on the rows) | `omarchy-shell io.github.17xande.simple-sip view keypad` |
 | Transfer (blind) | click **Transfer…**, enter the target | `t` | `omarchy-shell io.github.17xande.simple-sip transfer sip:1002@pbx` |
 | Do not disturb | click **Do not disturb** | `q` | `omarchy-shell io.github.17xande.simple-sip dnd` |
 | Redial last outgoing call | select it in Recent calls | — | `omarchy-shell io.github.17xande.simple-sip redial` |
 | Call voicemail | click **Voicemail** | `v` | — |
-| Contacts screen | click **Contacts** | `o` | — |
+| Contacts screen | click **Contacts** | `o` | `omarchy-shell io.github.17xande.simple-sip view contacts` |
 | Save as contact | right-click a call or a suggestion | `c` on a row | `omarchy-sip contacts add …` |
 | New / edit contact | **New contact** in the contacts screen; right-click a contact | `e` or `c` on a contact | `omarchy-sip contacts add … [--replace=OLD]` |
 | Delete contact | — | `x` or Delete on a contact, twice | `omarchy-sip contacts remove …` |
-| Whole call log | click **All calls** under Recent calls | `y` | `omarchy-sip history` |
+| Whole call log | click **All calls** under Recent calls | `y` | `omarchy-shell io.github.17xande.simple-sip view history`; `omarchy-sip history` for the log itself |
 | Clear the call log | click **Clear history**, twice | — | `omarchy-sip history --clear` |
 | Back | — | Escape (out of a form, then a screen, then the panel) | — |
-| Account settings | click the gear row | `s` | — |
+| Account settings | click the gear row | `s` | `omarchy-shell io.github.17xande.simple-sip view setup` |
+| Back to the main screen | — | — | `omarchy-shell io.github.17xande.simple-sip view main` |
+
+`view` opens the panel straight onto a screen, so a keybinding can take you to
+Contacts: `omarchy-shell io.github.17xande.simple-sip view contacts`. It takes one of `main`, `contacts`, `history`,
+`keypad` (the main screen with the dial keypad open) or `setup`. It only moves an
+idle phone -- during a ringing or live call it answers `refused: busy` and leaves
+the screen with Answer and Hang up on it -- and the screens need the daemon and an
+account, so it refuses those too; `setup` still works with the daemon down, as the
+gear row does.
 
 Every IPC call answers `ok`, or `refused: <why>` when there was nothing to do. A
 bare extension or phone number is completed with your account's domain, so `1001`
@@ -323,6 +332,7 @@ installing a plugin never writes to your Hyprland config. Add what you want to
 bindd = SUPER SHIFT, T, SIP dialer, exec, omarchy-shell shell toggle io.github.17xande.simple-sip ""
 bindd = SUPER, F9, Answer SIP call, exec, omarchy-shell io.github.17xande.simple-sip answer
 bindd = SUPER SHIFT, F9, Hang up SIP call, exec, omarchy-shell io.github.17xande.simple-sip hangup
+bindd = SUPER, F10, SIP contacts, exec, omarchy-shell io.github.17xande.simple-sip view contacts
 ```
 
 `shell toggle` opens the panel on the focused monitor. The bar builds one copy of

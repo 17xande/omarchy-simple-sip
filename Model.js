@@ -347,6 +347,25 @@ function codecArg(enabled) {
   return out.join(",")
 }
 
+// What the IPC `view` call may do. `name` is one of main, contacts, history,
+// keypad (the main screen with the dial keypad open) or setup (account
+// settings); `state` is {callState, daemonUp, configured}. Returns
+// {refused: "<why>"} or {view, dialPad, setup} -- the state to put the panel in.
+// Only an idle phone is moved around: a ringing or live call keeps the screen
+// that holds Answer and Hang up. Account settings are also reachable with the
+// daemon down, as the row is.
+function viewPlan(name, state) {
+  var known = ["main", "contacts", "history", "keypad", "setup"]
+  if (known.indexOf(name) < 0) return { refused: "unknown view (main, contacts, history, keypad, setup)" }
+  var st = state || {}
+  if (st.callState !== "idle") return { refused: "busy: a call is in progress" }
+  if (name === "setup") return { view: "main", dialPad: false, setup: true }
+  if (!st.daemonUp) return { refused: "the SIP daemon is not running" }
+  if (!st.configured) return { refused: "no account yet: open setup first" }
+  if (name === "keypad") return { view: "main", dialPad: true, setup: false }
+  return { view: name, dialPad: false, setup: false }
+}
+
 // ------------------------------------------------------------- presentation
 
 // The codec an established call is using, from baresip's `audio_debug`, which

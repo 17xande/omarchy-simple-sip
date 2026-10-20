@@ -634,9 +634,36 @@ Panel {
       var reason = sip.toggleDnd()
       return reason ? "refused: " + reason : (sip.dnd ? "on" : "off")
     }
+    function view(name: string): string { return root.showView(name) }
     function status(): string {
       return sip.callState + " " + (sip.peer || "-") + " " + sip.registration
     }
+  }
+
+  // IPC `view`: open the panel on a given screen without a key press. The
+  // state is set after summonHere() -- opening resets the panel to its main
+  // screen (onOpenedChanged) -- and again on the next turn, for a shell that
+  // opens the panel a moment later. Already open, `opened` does not change and
+  // the first assignment is the one that counts. Both are plain assignments, so
+  // doing it twice is harmless.
+  function showView(name) {
+    var plan = Model.viewPlan(name, { callState: sip.callState, daemonUp: sip.daemonUp,
+                                      configured: sip.configured })
+    if (plan.refused) return "refused: " + plan.refused
+    summonHere()
+    applyViewPlan(plan)
+    Qt.callLater(function() { if (sip.callState === "idle") root.applyViewPlan(plan) })
+    return "ok"
+  }
+
+  function applyViewPlan(plan) {
+    contactOpen = false
+    setupOpen = plan.setup
+    view = plan.view
+    dialPadOpen = plan.dialPad
+    disarm()
+    cursorActive = false
+    cursorIndex = 0
   }
 
   function ipcResult(reason) {
